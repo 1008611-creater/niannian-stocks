@@ -15,9 +15,9 @@
   "dependencies": {
     "@capacitor/android": "^7.4.3",
     "@capacitor/core": "^7.4.3",
-    "convex": "^1.43.0",
     "@upstash/ratelimit": "^2.0.5",
     "@upstash/redis": "^1.34.3",
+    "convex": "1.40.0",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "lightweight-charts": "^5.0.8",

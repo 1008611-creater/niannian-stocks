@@ -1,6 +1,7 @@
 import { ConvexError } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import type { MutationCtx } from "./_generated/server";
 import { requireUserId } from "./lib/auth";
 
 const SYMBOL = /^[A-Z.]{1,10}$/;
@@ -10,7 +11,7 @@ function normalizedSymbol(value: string) {
   return result;
 }
 
-async function getOrCreateDefaultPortfolio(ctx: Parameters<typeof requireUserId>[0], userId: string) {
+async function getOrCreateDefaultPortfolio(ctx: MutationCtx, userId: string) {
   const existing = await ctx.db.query("portfolios").withIndex("by_user", (q) => q.eq("userId", userId)).collect();
   const first = existing.find((item) => item.isDefault) ?? existing[0];
   if (first) return first;

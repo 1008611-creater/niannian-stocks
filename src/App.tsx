@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'preact/hooks';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiError, loadResearch } from './api';
 import { EquityChart, PriceChart } from './chart';
 import { buildLegacyImport, legacyImportAvailable, readHoldings, readWatchlist, saveHoldings, saveWatchlist, validSymbol } from './storage';
@@ -17,6 +17,17 @@ function ResearchState({ error, retry }: { error: ApiError | null; retry: () => 
   return <div class="error-state" role="alert"><strong>行情没有载入</strong><span>{error.message}</span>{error.retryable && <button class="secondary" onClick={retry}>重新尝试</button>}</div>;
 }
 
+function signalLabel(snapshot: Snapshot) {
+  const { summary, backtest } = snapshot;
+  const evidence = [
+    summary.trend === 'bullish' ? 'MA20 高于 MA50，短期趋势位于长期趋势之上' : 'MA20 低于 MA50，短期趋势弱于长期趋势',
+    summary.rsi14 === null ? 'RSI 样本不足，暂不作超买超卖判断' : `RSI(14) 为 ${summary.rsi14}，仅作为动量观察项`,
+    summary.volumeRatio === null ? '成交量样本不足，暂不作量能判断' : `最近成交量约为前五日均量的 ${summary.volumeRatio} 倍`,
+    `回测区间 ${backtest.sample.start}–${backtest.sample.end}，策略收益与买入持有分别为 ${signed(backtest.metrics.cumulativeReturnPct)} 和 ${signed(backtest.metrics.buyHoldReturnPct)}`,
+  ];
+  return evidence;
+}
+
 export default function App() {
   const [symbol, setSymbol] = useState(defaultSnapshot);
   const [input, setInput] = useState(defaultSnapshot);
@@ -31,17 +42,25 @@ export default function App() {
   const [cost, setCost] = useState('');
   const [message, setMessage] = useState('');
   const [showImport, setShowImport] = useState(legacyImportAvailable);
+  const [refreshing, setRefreshing] = useState(false);
+  const requestRef = useRef<AbortController | null>(null);
 
-  const fetchSnapshot = (target: string) => {
+  const fetchSnapshot = (target: string, preserveSnapshot = false) => {
+    requestRef.current?.abort();
     const controller = new AbortController();
-    setLoading(true); setError(null); setSnapshot(null);
-    loadResearch(target, controller.signal).then((next) => { setSnapshot(next); setLoading(false); }).catch((reason: unknown) => {
+    requestRef.current = controller;
+    setLoading(true); setError(null); if (!preserveSnapshot) setSnapshot(null);
+    if (preserveSnapshot) setRefreshing(true);
+    loadResearch(target, controller.signal).then((next) => { setSnapshot(next); setLoading(false); setRefreshing(false); }).catch((reason: unknown) => {
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
-      setError(reason instanceof ApiError ? reason : new ApiError('unknown', '研究数据载入失败，请稍后重试。', true)); setLoading(false);
+      setError(reason instanceof ApiError ? reason : new ApiError('unknown', '研究数据载入失败，请稍后重试。', true)); setLoading(false); setRefreshing(false);
     });
-    return () => controller.abort();
+    return controller;
   };
-  useEffect(() => fetchSnapshot(symbol), [symbol]);
+  useEffect(() => {
+    const controller = fetchSnapshot(symbol);
+    return () => controller.abort();
+  }, [symbol]);
   useEffect(() => saveWatchlist(watchlist), [watchlist]);
   useEffect(() => saveHoldings(holdings), [holdings]);
 
@@ -52,6 +71,7 @@ export default function App() {
     const value = active.reduce((total, item) => total + item.quantity * snapshot.summary.price, 0);
     return { invested, value, pnl: value - invested, activeCount: active.length };
   }, [holdings, snapshot]);
+  const evidence = useMemo(() => snapshot ? signalLabel(snapshot) : [], [snapshot]);
 
   function chooseSymbol(next: string) { const value = next.trim().toUpperCase(); if (!validSymbol(value)) { setMessage('请输入有效的美股代码。'); return; } setInput(value); setSymbol(value); setMessage(''); }
   function addWatch(event: Event) { event.preventDefault(); const next = watchInput.trim().toUpperCase(); if (!validSymbol(next)) { setMessage('自选代码格式不正确。'); return; } if (watchlist.includes(next)) { setMessage(`${next} 已在自选中。`); return; } if (watchlist.length >= 5) { setMessage('免费层最多 5 只自选。登录并升级 Pro 后可扩展至 50 只。'); return; } setWatchlist([...watchlist, next]); setWatchInput(''); setMessage(`${next} 已加入自选。`); }
@@ -68,7 +88,7 @@ export default function App() {
       <div><p class="brand">念念智股</p><p class="service-label">美股组合决策助手 · 限额研究公测</p></div>
       <div class="account-status"><span>免费层</span><button class="quiet" onClick={() => setMessage('登录、云同步和 Pro 权益将在 Clerk / Convex 接入后启用。当前不会伪造付费状态。')}>登录与同步</button></div>
     </header>
-    <p class="notice" role="status">{message || '研究用途，不构成投资建议；日线并非交易级实时行情。'}</p>
+    <p class="notice" role="status" aria-live="polite">{message || '研究用途，不构成投资建议；日线并非交易级实时行情。'}</p>
     {showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
 
     <section class="decision-panel" aria-labelledby="today-title">
@@ -85,15 +105,16 @@ export default function App() {
       <div class="primary-column">
         <section class="surface symbol-control" aria-labelledby="research-title">
           <div><h2 id="research-title">单股研究</h2><p>图表、技术摘要、回测与持仓估值来自同一个研究快照。</p></div>
-          <form onSubmit={(event) => { event.preventDefault(); chooseSymbol(input); }}><input aria-label="美股代码" value={input} maxlength={10} onInput={(event) => setInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">查看</button></form>
+          <form onSubmit={(event) => { event.preventDefault(); chooseSymbol(input); }}><input aria-label="美股代码" value={input} maxlength={10} autoCapitalize="characters" spellcheck={false} required onInput={(event) => setInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit" disabled={loading && !snapshot}>查看</button></form>
         </section>
         <section class="surface chart-surface">
-          {loading || error || !snapshot ? <ResearchState error={error} retry={() => chooseSymbol(symbol)} /> : <>
-            <div class="quote-row"><div><h2>{snapshot.symbol} 日线</h2><p>{snapshot.source} · {snapshot.marketStatus === 'market_closed' ? '休市' : '收盘或延迟数据'}</p></div><div class="quote"><strong>{currency.format(snapshot.summary.price)}</strong><span class={tone(snapshot.summary.change)}>{signed(snapshot.summary.changePct)} · {snapshot.summary.change >= 0 ? '+' : ''}{snapshot.summary.change.toFixed(2)}</span></div></div>
+          {(!snapshot && loading) || error || !snapshot ? <ResearchState error={error} retry={() => chooseSymbol(symbol)} /> : <>
+            <div class="quote-row"><div><h2>{snapshot.symbol} 日线</h2><p>{snapshot.source} · {snapshot.marketStatus === 'market_closed' ? '休市' : '收盘或延迟数据'}</p></div><div class="quote"><strong>{currency.format(snapshot.summary.price)}</strong><span class={tone(snapshot.summary.change)}>{signed(snapshot.summary.changePct)} · {snapshot.summary.change >= 0 ? '+' : ''}{snapshot.summary.change.toFixed(2)}</span></div><button class="secondary refresh" onClick={() => fetchSnapshot(symbol, true)} disabled={refreshing} aria-label="刷新研究快照">{refreshing ? '刷新中…' : '刷新'}</button></div>
             <PriceChart candles={snapshot.candles} label={snapshot.symbol} />
             <p class="data-footnote">{snapshot.delayLabel} 更新时间：{displayDate(snapshot.updatedAt)}。来源：{snapshot.source}。</p>
           </>}
         </section>
+        {snapshot && <section class="surface evidence" aria-labelledby="evidence-title"><div class="section-head"><div><h2 id="evidence-title">为什么出现这个信号</h2><p>只展示当前快照可追溯的证据，不生成买卖指令。</p></div><span class="research-tag">同一快照</span></div><ul>{evidence.map((item) => <li key={item}>{item}</li>)}</ul><p class="data-footnote">策略结果包含滑点和交易成本，不能代表未来表现。</p></section>}
         {snapshot && <section class="surface backtest" aria-labelledby="backtest-title"><div class="section-head"><div><h2 id="backtest-title">策略研究回测</h2><p>{snapshot.backtest.strategy.name} · {snapshot.backtest.strategy.version}</p></div><span class="research-tag">可复核研究</span></div><div class="metric-grid"><div><span>策略收益</span><b class={tone(snapshot.backtest.metrics.cumulativeReturnPct)}>{signed(snapshot.backtest.metrics.cumulativeReturnPct)}</b></div><div><span>买入持有</span><b class={tone(snapshot.backtest.metrics.buyHoldReturnPct)}>{signed(snapshot.backtest.metrics.buyHoldReturnPct)}</b></div><div><span>最大回撤</span><b class="negative">{signed(snapshot.backtest.metrics.maxDrawdownPct)}</b></div><div><span>年化波动</span><b>{Math.abs(snapshot.backtest.metrics.annualizedVolatilityPct).toFixed(2)}%</b></div></div><EquityChart points={snapshot.backtest.equity} /><p class="data-footnote">样本：{snapshot.backtest.sample.start} 至 {snapshot.backtest.sample.end}，{snapshot.backtest.sample.candleCount} 根日线。{snapshot.backtest.strategy.assumptions}</p></section>}
       </div>
       <aside class="secondary-column">

@@ -2,7 +2,13 @@ node_modules/
 dist/
 .env
 .env.local
-android/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/google-services.json
+android/capacitor-cordova-android-plugins/
+android/capacitor.build.gradle
+android/capacitor.settings.gradle
 google-services.json
 *.keystore
 *.jks

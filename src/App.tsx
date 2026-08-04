@@ -105,7 +105,7 @@ export default function App() {
       <div class="primary-column">
         <section class="surface symbol-control" aria-labelledby="research-title">
           <div><h2 id="research-title">单股研究</h2><p>图表、技术摘要、回测与持仓估值来自同一个研究快照。</p></div>
-          <form onSubmit={(event) => { event.preventDefault(); chooseSymbol(input); }}><input aria-label="美股代码" value={input} maxlength={10} autoCapitalize="characters" spellcheck={false} required onInput={(event) => setInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit" disabled={loading && !snapshot}>查看</button></form>
+          <form onSubmit={(event) => { event.preventDefault(); chooseSymbol(input); }}><input aria-label="美股代码" value={input} maxlength={10} autoCapitalize="characters" spellcheck={false} required onInput={(event) => setInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">查看</button></form>
         </section>
         <section class="surface chart-surface">
           {(!snapshot && loading) || error || !snapshot ? <ResearchState error={error} retry={() => chooseSymbol(symbol)} /> : <>

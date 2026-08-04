@@ -15,4 +15,26 @@ npm run android:debug
 3. Clerk、Dodo 和 Firebase 的允许域名及深链回跳已经在各自控制台配置。
 4. 在仓库外生成发布签名密钥，并通过 Android `signingConfigs.release` 引用环境变量或安全路径。
 
+签名配置不会写入仓库。先在仓库外生成一次密钥，并在当前 PowerShell 会话中设置以下变量：
+
+```powershell
+keytool -genkeypair -v -keystore 'D:\secure\niannian-stocks-release.jks' -alias niannian-stocks -keyalg RSA -keysize 2048 -validity 10000
+$env:NIANNIAN_KEYSTORE_PATH = 'D:\secure\niannian-stocks-release.jks'
+$env:NIANNIAN_KEYSTORE_PASSWORD = '<密钥库密码>'
+$env:NIANNIAN_KEY_ALIAS = 'niannian-stocks'
+$env:NIANNIAN_KEY_PASSWORD = '<签名密码>'
+```
+
+正式构建：
+
+```powershell
+npm run android:sync
+cd android
+.\gradlew.bat :app:assembleRelease --no-daemon
+cd ..
+Get-FileHash .\android\app\build\outputs\apk\release\app-release.apk -Algorithm SHA256
+```
+
+如果没有设置四个 `NIANNIAN_*` 变量，正式构建不得发布；调试构建仍可使用 `npm run android:debug`。密钥文件、密码和环境变量不要提交到 Git、APK、网站或日志。
+
 不要发布指向本机、测试 URL，或包含任何服务端密钥的 APK。

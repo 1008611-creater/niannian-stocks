@@ -22,7 +22,7 @@ const workspace = createWorkspaceStore({ url: process.env.SUPABASE_URL, serviceR
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], baseUri: ["'self'"], frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'"], styleSrc: ["'self'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"] } }, crossOriginEmbedderPolicy: false }));
+app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], baseUri: ["'self'"], frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://clerk.stocks.cauai.fun'], connectSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], frameSrc: ['https://clerk.stocks.cauai.fun'] } }, crossOriginEmbedderPolicy: false }));
 app.use(express.json({ limit: '16kb' }));
 
 function requestIdentity(request) {
@@ -40,6 +40,10 @@ app.get('/api/health', (_request, response) => response.json({
   clerk: process.env.CLERK_JWT_ISSUER_DOMAIN ? 'configured' : 'not_configured',
   workspace: workspace.enabled ? 'configured' : 'not_configured',
   yahooFallback: false,
+}));
+app.get('/api/auth/config', (_request, response) => response.json({
+  configured: Boolean(process.env.CLERK_JWT_ISSUER_DOMAIN && process.env.CLERK_PUBLISHABLE_KEY),
+  ...(process.env.CLERK_JWT_ISSUER_DOMAIN && process.env.CLERK_PUBLISHABLE_KEY ? { frontendApi: process.env.CLERK_JWT_ISSUER_DOMAIN, publishableKey: process.env.CLERK_PUBLISHABLE_KEY } : {}),
 }));
 app.get('/api/market/research', async (request, response, next) => {
   try {
@@ -68,6 +72,41 @@ app.post('/api/account/workspace/import', async (request, response, next) => {
     const { userId } = await verifyClerkRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.status(201).json(await workspace.importFirstWorkspace(userId, request.body));
+  } catch (error) { next(error); }
+});
+app.post('/api/account/watchlist', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.addWatchlistItem(userId, request.body?.symbol));
+  } catch (error) { next(error); }
+});
+app.delete('/api/account/watchlist/:symbol', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.removeWatchlistItem(userId, request.params.symbol));
+  } catch (error) { next(error); }
+});
+app.post('/api/account/portfolios', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(201).json(await workspace.createPortfolio(userId, request.body?.name));
+  } catch (error) { next(error); }
+});
+app.post('/api/account/holdings', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.saveHolding(userId, request.body));
+  } catch (error) { next(error); }
+});
+app.delete('/api/account/holdings/:id', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.removeHolding(userId, request.params.id));
   } catch (error) { next(error); }
 });
 app.use(express.static(resolve(here, '..', 'dist'), { index: 'index.html', maxAge: isProduction ? '1h' : 0, etag: true }));

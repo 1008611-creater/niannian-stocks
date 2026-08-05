@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiError, loadResearch } from './api';
+import { authHeader, loadClerk } from './auth';
 import { EquityChart, PriceChart } from './chart';
-import { buildLegacyImport, legacyImportAvailable, localDefaultPortfolio, readHoldings, readPortfolios, readWatchlist, saveHoldings, saveWatchlist, validSymbol } from './storage';
-import type { Holding, Snapshot } from './types';
+import { legacyImportAvailable, localDefaultPortfolio, readHoldings, readPortfolios, readWatchlist, saveHoldings, savePortfolios, saveWatchlist, validSymbol } from './storage';
+import type { Holding, Portfolio, Snapshot } from './types';
 
 const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
@@ -42,12 +43,26 @@ function getDeepLinkPlugin() {
   return (window as Window & { Capacitor?: { Plugins?: { DeepLink?: DeepLinkPlugin } } }).Capacitor?.Plugins?.DeepLink;
 }
 
+type CloudWorkspace = {
+  portfolios: { id: string; name: string; is_default: boolean }[];
+  holdings: { id: string; portfolio_id: string; symbol: string; quantity: number; averageCost: number }[];
+  watchlist: string[];
+  entitlement?: { plan_key?: string };
+};
+type AccountError = Error & { status?: number; code?: string };
+
+function accountError(response: Response, payload: { error?: string; message?: string }) {
+  const error = new Error(payload.message || '账户服务暂时不可用，请稍后重试。') as AccountError;
+  error.status = response.status; error.code = payload.error;
+  return error;
+}
+
 export default function App() {
   const [symbol, setSymbol] = useState(defaultSnapshot);
   const [input, setInput] = useState(defaultSnapshot);
   const [watchlist, setWatchlist] = useState(readWatchlist);
   const [holdings, setHoldings] = useState<Holding[]>(readHoldings);
-  const [portfolios] = useState(readPortfolios);
+  const [portfolios, setPortfolios] = useState<Portfolio[]>(readPortfolios);
   const [activePortfolioId, setActivePortfolioId] = useState(() => readPortfolios()[0]?.id || localDefaultPortfolio.id);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
@@ -60,7 +75,11 @@ export default function App() {
   const [showImport, setShowImport] = useState(legacyImportAvailable);
   const [refreshing, setRefreshing] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
+  const [clerk, setClerk] = useState<Awaited<ReturnType<typeof loadClerk>>>(null);
+  const [accountUser, setAccountUser] = useState<{ id: string; email: string } | null>(null);
+  const [accountState, setAccountState] = useState<'loading' | 'signed_out' | 'syncing' | 'ready' | 'error' | 'unavailable'>('loading');
   const requestRef = useRef<AbortController | null>(null);
+  const importedAccountRef = useRef<string | null>(null);
 
   const fetchSnapshot = (target: string, preserveSnapshot = false) => {
     requestRef.current?.abort();
@@ -80,6 +99,7 @@ export default function App() {
   }, [symbol]);
   useEffect(() => saveWatchlist(watchlist), [watchlist]);
   useEffect(() => saveHoldings(holdings), [holdings]);
+  useEffect(() => savePortfolios(portfolios), [portfolios]);
   useEffect(() => {
     const markOnline = () => setOnline(true);
     const markOffline = () => setOnline(false);
@@ -87,6 +107,67 @@ export default function App() {
     window.addEventListener('offline', markOffline);
     return () => { window.removeEventListener('online', markOnline); window.removeEventListener('offline', markOffline); };
   }, []);
+
+  const activePortfolio = portfolios.find((item) => item.id === activePortfolioId) || portfolios[0] || localDefaultPortfolio;
+  const applyWorkspace = useCallback((next: CloudWorkspace) => {
+    const nextPortfolios = Array.isArray(next.portfolios) ? next.portfolios.map((item) => ({ id: item.id, name: item.name, isDefault: Boolean(item.is_default) })) : [];
+    const nextHoldings = Array.isArray(next.holdings) ? next.holdings.map((item) => ({ id: item.id, portfolioId: item.portfolio_id, symbol: item.symbol, quantity: Number(item.quantity), cost: Number(item.averageCost) })) : [];
+    const nextWatchlist = Array.isArray(next.watchlist) ? next.watchlist.filter(validSymbol).slice(0, 50) : [];
+    if (nextPortfolios.length) {
+      setPortfolios(nextPortfolios);
+      setActivePortfolioId((current) => nextPortfolios.some((item) => item.id === current) ? current : nextPortfolios[0].id);
+    }
+    setHoldings(nextHoldings); setWatchlist(nextWatchlist);
+  }, []);
+
+  const accountRequest = useCallback(async (path: string, options: RequestInit = {}) => {
+    if (!clerk) throw new Error('请先完成登录。');
+    const headers = new Headers(await authHeader(clerk));
+    if (options.body) headers.set('content-type', 'application/json');
+    const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw accountError(response, payload);
+    return payload as CloudWorkspace;
+  }, [clerk]);
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+    const setIdentity = (client: NonNullable<Awaited<ReturnType<typeof loadClerk>>>) => {
+      const user = client.user;
+      if (!active) return;
+      setAccountUser(user ? { id: user.id, email: user.primaryEmailAddress?.emailAddress || '已登录账户' } : null);
+      setAccountState(user ? 'syncing' : 'signed_out');
+    };
+    void loadClerk().then((client) => {
+      if (!active) return;
+      setClerk(client); if (!client) { setAccountState('unavailable'); return; }
+      setIdentity(client); unsubscribe = client.addListener(() => setIdentity(client));
+    });
+    return () => { active = false; unsubscribe?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!accountUser || !clerk || importedAccountRef.current === accountUser.id) return;
+    let active = true;
+    const sync = async () => {
+      try {
+        const initial = await accountRequest('/api/account/workspace');
+        const empty = !initial.portfolios.length && !initial.holdings.length && !initial.watchlist.length;
+        const cloud = empty ? await accountRequest('/api/account/workspace/import', { method: 'POST', body: JSON.stringify({ portfolio: { name: activePortfolio.name }, watchlist, holdings }) }) : initial;
+        if (!active) return;
+        applyWorkspace(cloud); importedAccountRef.current = accountUser.id;
+        setAccountState('ready'); setMessage(empty ? '本机自选与持仓已首次导入云端账户。' : '已加载云端组合，可在网页与手机端继续使用。');
+      } catch (reason) {
+        if (!active) return;
+        const error = reason as AccountError;
+        if (error.status === 401) { setAccountState('signed_out'); setAccountUser(null); return; }
+        setAccountState('error'); setMessage(error.message || '云端资料暂未载入，本机数据未被覆盖。');
+      }
+    };
+    void sync();
+    return () => { active = false; };
+  }, [accountRequest, accountUser, activePortfolio.name, applyWorkspace, clerk, holdings, watchlist]);
   useEffect(() => {
     const plugin = getDeepLinkPlugin();
     let disposed = false;
@@ -103,7 +184,6 @@ export default function App() {
     return () => { disposed = true; void listener?.remove?.(); };
   }, []);
 
-  const activePortfolio = portfolios.find((item) => item.id === activePortfolioId) || portfolios[0] || localDefaultPortfolio;
   const portfolioHoldings = useMemo(() => holdings.filter((item) => item.portfolioId === activePortfolio.id), [holdings, activePortfolio.id]);
   const holdingSummary = useMemo(() => {
     if (!snapshot || !portfolioHoldings.length) return null;
@@ -116,11 +196,11 @@ export default function App() {
   const evidence = useMemo(() => snapshot ? signalLabel(snapshot) : [], [snapshot]);
 
   function chooseSymbol(next: string) { const value = next.trim().toUpperCase(); if (!validSymbol(value)) { setMessage('请输入有效的美股代码。'); return; } setInput(value); setSymbol(value); setMessage(''); }
-  function addWatch(event: Event) { event.preventDefault(); const next = watchInput.trim().toUpperCase(); if (!validSymbol(next)) { setMessage('自选代码格式不正确。'); return; } if (watchlist.includes(next)) { setMessage(`${next} 已在自选中。`); return; } if (watchlist.length >= 5) { setMessage('免费层最多 5 只自选。登录并升级 Pro 后可扩展至 50 只。'); return; } setWatchlist([...watchlist, next]); setWatchInput(''); setMessage(`${next} 已加入自选。`); }
+  async function addWatch(event: Event) { event.preventDefault(); const next = watchInput.trim().toUpperCase(); if (!validSymbol(next)) { setMessage('自选代码格式不正确。'); return; } if (watchlist.includes(next)) { setMessage(`${next} 已在自选中。`); return; } if (!accountUser && watchlist.length >= 5) { setMessage('免费层最多 5 只自选。登录并升级 Pro 后可扩展至 50 只。'); return; } try { if (accountUser) applyWorkspace(await accountRequest('/api/account/watchlist', { method: 'POST', body: JSON.stringify({ symbol: next }) })); else setWatchlist([...watchlist, next]); setWatchInput(''); setMessage(`${next} 已加入${accountUser ? '云端' : '本机'}自选。`); } catch (reason) { setMessage((reason as Error).message); } }
   function addPosition(event: Event) {
     event.preventDefault(); savePosition();
   }
-  function savePosition() {
+  async function savePosition() {
     const next = positionSymbol.trim().toUpperCase(); const parsedQuantity = Number(quantity); const parsedCost = Number(cost);
     if (!validSymbol(next) || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0 || !Number.isFinite(parsedCost) || parsedCost <= 0) { setMessage('请填写有效代码、数量和平均成本。'); return; }
     if (editingHoldingId) {
@@ -128,23 +208,27 @@ export default function App() {
       if (!current) { setEditingHoldingId(null); setMessage('要编辑的持仓不存在，请重新录入。'); return; }
       const matching = holdings.find((item) => item.id !== current.id && item.portfolioId === activePortfolio.id && item.symbol === next);
       const updated = matching ? holdings.filter((item) => item.id !== current.id).map((item) => item.id === matching.id ? { ...item, quantity: item.quantity + parsedQuantity, cost: (item.quantity * item.cost + parsedQuantity * parsedCost) / (item.quantity + parsedQuantity) } : item) : holdings.map((item) => item.id === current.id ? { ...item, symbol: next, quantity: parsedQuantity, cost: parsedCost } : item);
-      setHoldings(updated); setMessage(`${next} 持仓已更新。`);
+      try { if (accountUser) applyWorkspace(await accountRequest('/api/account/holdings', { method: 'POST', body: JSON.stringify({ id: current.id, portfolioId: activePortfolio.id, symbol: next, quantity: parsedQuantity, cost: parsedCost }) })); else setHoldings(updated); setMessage(`${next} 持仓已更新${accountUser ? '并同步到云端' : ''}。`); } catch (reason) { setMessage((reason as Error).message); return; }
     } else {
       const existing = holdings.find((item) => item.portfolioId === activePortfolio.id && item.symbol === next);
       const updated = existing ? holdings.map((item) => item.id === existing.id ? { ...item, quantity: item.quantity + parsedQuantity, cost: (item.quantity * item.cost + parsedQuantity * parsedCost) / (item.quantity + parsedQuantity) } : item) : [...holdings, { id: crypto.randomUUID(), portfolioId: activePortfolio.id, symbol: next, quantity: parsedQuantity, cost: parsedCost }];
-      setHoldings(updated); setMessage(`${next} 已写入${activePortfolio.name}；登录后将可云同步。`);
+      try { if (accountUser) applyWorkspace(await accountRequest('/api/account/holdings', { method: 'POST', body: JSON.stringify({ portfolioId: activePortfolio.id, symbol: next, quantity: parsedQuantity, cost: parsedCost }) })); else setHoldings(updated); setMessage(`${next} 已写入${activePortfolio.name}${accountUser ? '并同步到云端' : '；登录后将可云同步'}。`); } catch (reason) { setMessage((reason as Error).message); return; }
     }
     setPositionSymbol(''); setQuantity(''); setCost(''); setEditingHoldingId(null);
   }
   function editHolding(item: Holding) { setEditingHoldingId(item.id); setPositionSymbol(item.symbol); setQuantity(String(item.quantity)); setCost(String(item.cost)); setMessage(`正在编辑 ${item.symbol}。`); }
   function cancelEdit() { setEditingHoldingId(null); setPositionSymbol(''); setQuantity(''); setCost(''); setMessage('已取消编辑。'); }
-  function requestNewPortfolio() { setMessage('免费层最多 1 个组合。完成登录并获得 Pro 权益后，可在这里创建最多 5 个组合。'); }
-  function importLegacy() { const payload = buildLegacyImport(); sessionStorage.setItem('niannian-stocks-pending-import', JSON.stringify(payload)); setShowImport(false); setMessage('旧试玩页数据已安全整理为待导入包；登录功能接入后会写入当前账户。'); }
+  async function removeWatch(symbolToRemove: string) { try { if (accountUser) applyWorkspace(await accountRequest(`/api/account/watchlist/${encodeURIComponent(symbolToRemove)}`, { method: 'DELETE' })); else setWatchlist(watchlist.filter((value) => value !== symbolToRemove)); setMessage(`${symbolToRemove} 已从自选移除。`); } catch (reason) { setMessage((reason as Error).message); } }
+  async function removePosition(id: string) { try { if (accountUser) applyWorkspace(await accountRequest(`/api/account/holdings/${encodeURIComponent(id)}`, { method: 'DELETE' })); else setHoldings(holdings.filter((holding) => holding.id !== id)); setMessage('持仓已移除。'); } catch (reason) { setMessage((reason as Error).message); } }
+  async function requestNewPortfolio() { if (!accountUser) { setMessage('免费层最多 1 个组合。完成登录并获得 Pro 权益后，可在这里创建最多 5 个组合。'); return; } const name = window.prompt('请输入新组合名称（最多 40 个字）'); if (!name?.trim()) return; try { const next = await accountRequest('/api/account/portfolios', { method: 'POST', body: JSON.stringify({ name }) }); applyWorkspace(next); const created = next.portfolios.find((item) => item.name === name.trim()); if (created) setActivePortfolioId(created.id); setMessage('新组合已创建并同步到云端。'); } catch (reason) { setMessage((reason as Error).message); } }
+  function importLegacy() { setShowImport(false); setMessage(accountUser ? '登录时会优先保留云端数据；当前本机草稿仅在云端为空时首次导入。' : '登录后，本机自选和持仓会一次性导入当前账户。'); }
+  async function startSignIn() { const client = clerk || await loadClerk(); if (!client) { setMessage('登录服务尚未完成公开前端配置，请稍后重试。'); return; } setClerk(client); client.openSignIn({ afterSignInUrl: window.location.origin, afterSignUpUrl: window.location.origin }); }
+  async function signOut() { if (!clerk) return; await clerk.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
 
   return <main>
     <header class="topbar">
       <div><p class="brand">念念智股</p><p class="service-label">美股组合决策助手 · 限额研究公测</p></div>
-      <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span><span>免费层</span><button class="quiet" onClick={() => setMessage('当前为本机研究模式；登录、云同步和 Pro 权益待接入账户服务后启用。不会伪造付费状态。')}>登录与同步</button></div>
+      <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span><span>{accountState === 'ready' && accountUser ? '已同步' : accountState === 'syncing' ? '同步中' : accountState === 'error' ? '同步未完成' : '免费层'}</span>{accountUser ? <><span class="account-email" title={accountUser.email}>{accountUser.email}</span><button class="quiet" onClick={signOut}>退出登录</button></> : <button class="quiet" onClick={startSignIn} disabled={accountState === 'loading'}>{accountState === 'loading' ? '准备登录…' : accountState === 'unavailable' ? '登录待配置' : '登录与同步'}</button>}</div>
     </header>
     <p class="notice" role="status" aria-live="polite">{message || (!online ? '当前处于离线状态；已载入内容仍可查看，刷新行情需要网络。' : '研究用途，不构成投资建议；日线并非交易级实时行情。')}</p>
     {showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
@@ -177,13 +261,13 @@ export default function App() {
         {snapshot && <section class="surface backtest" aria-labelledby="backtest-title"><div class="section-head"><div><h2 id="backtest-title">策略研究回测</h2><p>{snapshot.backtest.strategy.name} · {snapshot.backtest.strategy.version}</p></div><span class="research-tag">可复核研究</span></div><div class="metric-grid"><div><span>策略收益</span><b class={tone(snapshot.backtest.metrics.cumulativeReturnPct)}>{signed(snapshot.backtest.metrics.cumulativeReturnPct)}</b></div><div><span>买入持有</span><b class={tone(snapshot.backtest.metrics.buyHoldReturnPct)}>{signed(snapshot.backtest.metrics.buyHoldReturnPct)}</b></div><div><span>最大回撤</span><b class="negative">{signed(snapshot.backtest.metrics.maxDrawdownPct)}</b></div><div><span>年化波动</span><b>{Math.abs(snapshot.backtest.metrics.annualizedVolatilityPct).toFixed(2)}%</b></div></div><EquityChart points={snapshot.backtest.equity} /><p class="data-footnote">样本：{snapshot.backtest.sample.start} 至 {snapshot.backtest.sample.end}，{snapshot.backtest.sample.candleCount} 根日线。{snapshot.backtest.strategy.assumptions}</p></section>}
       </div>
       <aside class="secondary-column">
-        <section class="surface"><div class="section-head"><div><h2>自选股</h2><p>免费层 0–5 / Pro 0–50</p></div></div><form class="compact-form" onSubmit={addWatch}><input aria-label="添加自选美股代码" placeholder="例如 META" value={watchInput} maxlength={10} onInput={(event) => setWatchInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">添加</button></form><ul class="symbol-list">{watchlist.map((item) => <li key={item}><button type="button" class={item === symbol ? 'active-symbol' : ''} onClick={() => chooseSymbol(item)}>{item}</button><button type="button" class="remove" aria-label={`删除 ${item}`} onClick={() => setWatchlist(watchlist.filter((value) => value !== item))}>移除</button></li>)}</ul></section>
+        <section class="surface"><div class="section-head"><div><h2>自选股</h2><p>{accountUser ? '云端保存 · 免费层 0–5 / Pro 0–50' : '免费层 0–5 / Pro 0–50'}</p></div></div><form class="compact-form" onSubmit={addWatch}><input aria-label="添加自选美股代码" placeholder="例如 META" value={watchInput} maxlength={10} onInput={(event) => setWatchInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">添加</button></form><ul class="symbol-list">{watchlist.map((item) => <li key={item}><button type="button" class={item === symbol ? 'active-symbol' : ''} onClick={() => chooseSymbol(item)}>{item}</button><button type="button" class="remove" aria-label={`删除 ${item}`} onClick={() => void removeWatch(item)}>移除</button></li>)}</ul></section>
         <section class="surface"><div class="section-head"><div><h2>技术摘要</h2><p>{snapshot ? '同一快照计算' : '等待行情'}</p></div></div>{snapshot ? <dl class="facts"><div><dt>RSI(14)</dt><dd>{snapshot.summary.rsi14 ?? '样本不足'}</dd></div><div><dt>成交量比</dt><dd>{snapshot.summary.volumeRatio ? `${snapshot.summary.volumeRatio}×` : '—'}</dd></div><div><dt>MA20 / MA50</dt><dd>{snapshot.summary.ma20} / {snapshot.summary.ma50}</dd></div><div><dt>20 日区间</dt><dd>{snapshot.summary.support20} – {snapshot.summary.resistance20}</dd></div></dl> : <p class="muted">载入后显示指标。</p>}</section>
         <section class="surface events-panel"><div class="section-head"><div><h2>事件与提醒</h2><p>{snapshot ? eventStatusLabel(snapshot) : '等待行情'}</p></div><span class="pro-tag">Pro</span></div>{snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">{snapshot?.eventsStatus === 'unavailable' ? '事件数据暂时不可用，行情仍可继续研究。' : '财报、分红与后台提醒会在数据源和账户权益完成后显示。'}</p>}<button type="button" class="secondary" onClick={() => setMessage('提醒设置会在账户同步和 Pro 权益接入后开放；当前不弹出升级窗口。')}>提醒设置</button></section>
       </aside>
     </section>
 
-    <section class="surface portfolio" aria-labelledby="portfolio-title"><div class="section-head"><div><h2 id="portfolio-title">组合草稿</h2><p>当前仅保存在本机；登录后会一次性迁移至你的云端账户。</p></div><span>{portfolioHoldings.length ? `${portfolioHoldings.length} 个标的` : '空组合'}</span></div><div class="portfolio-switcher"><label>当前组合<select value={activePortfolio.id} onChange={(event) => setActivePortfolioId((event.target as HTMLSelectElement).value)}>{portfolios.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button type="button" class="secondary" onClick={requestNewPortfolio}>新建组合</button></div><p class="portfolio-note">免费层 1 个组合；Pro 最多 5 个。当前组合成本合计：{currency.format(portfolioCostBasis)}。</p><form class="position-form" onSubmit={addPosition}><input aria-label="持仓代码" placeholder="代码，例如 NVDA" value={positionSymbol} maxlength={10} onInput={(event) => setPositionSymbol((event.target as HTMLInputElement).value.toUpperCase())} /><input aria-label="持仓数量" placeholder="数量" inputMode="decimal" type="number" min="0.0001" step="0.0001" value={quantity} onInput={(event) => setQuantity((event.target as HTMLInputElement).value)} /><input aria-label="平均成本（美元）" placeholder="平均成本 USD" inputMode="decimal" type="number" min="0.0001" step="0.01" value={cost} onInput={(event) => setCost((event.target as HTMLInputElement).value)} /><button type="button" onClick={savePosition}>{editingHoldingId ? '保存修改' : '保存持仓'}</button>{editingHoldingId && <button type="button" class="secondary cancel-edit" onClick={cancelEdit}>取消</button>}</form>{portfolioHoldings.length ? <div class="holding-list">{portfolioHoldings.map((item) => <div key={item.id}><button type="button" onClick={() => chooseSymbol(item.symbol)}>{item.symbol}</button><span>{item.quantity} 股 · 成本 {currency.format(item.cost)}</span><button type="button" class="quiet" aria-label={`编辑 ${item.symbol} 持仓`} onClick={() => editHolding(item)}>编辑</button><button type="button" class="remove" aria-label={`删除 ${item.symbol} 持仓`} onClick={() => setHoldings(holdings.filter((holding) => holding.id !== item.id))}>删除</button></div>)}</div> : <p class="muted">录入第一笔持仓后，会基于当前研究快照显示对应标的估值。</p>}</section>
+    <section class="surface portfolio" aria-labelledby="portfolio-title"><div class="section-head"><div><h2 id="portfolio-title">{accountUser ? '云端组合' : '组合草稿'}</h2><p>{accountUser ? '组合、自选和持仓会在网页与手机端保持一致。' : '当前仅保存在本机；登录后会一次性迁移至你的云端账户。'}</p></div><span>{portfolioHoldings.length ? `${portfolioHoldings.length} 个标的` : '空组合'}</span></div><div class="portfolio-switcher"><label>当前组合<select value={activePortfolio.id} onChange={(event) => setActivePortfolioId((event.target as HTMLSelectElement).value)}>{portfolios.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button type="button" class="secondary" onClick={requestNewPortfolio}>新建组合</button></div><p class="portfolio-note">免费层 1 个组合；Pro 最多 5 个。当前组合成本合计：{currency.format(portfolioCostBasis)}。</p><form class="position-form" onSubmit={addPosition}><input aria-label="持仓代码" placeholder="代码，例如 NVDA" value={positionSymbol} maxlength={10} onInput={(event) => setPositionSymbol((event.target as HTMLInputElement).value.toUpperCase())} /><input aria-label="持仓数量" placeholder="数量" inputMode="decimal" type="number" min="0.0001" step="0.0001" value={quantity} onInput={(event) => setQuantity((event.target as HTMLInputElement).value)} /><input aria-label="平均成本（美元）" placeholder="平均成本 USD" inputMode="decimal" type="number" min="0.0001" step="0.01" value={cost} onInput={(event) => setCost((event.target as HTMLInputElement).value)} /><button type="submit">{editingHoldingId ? '保存修改' : '保存持仓'}</button>{editingHoldingId && <button type="button" class="secondary cancel-edit" onClick={cancelEdit}>取消</button>}</form>{portfolioHoldings.length ? <div class="holding-list">{portfolioHoldings.map((item) => <div key={item.id}><button type="button" onClick={() => chooseSymbol(item.symbol)}>{item.symbol}</button><span>{item.quantity} 股 · 成本 {currency.format(item.cost)}</span><button type="button" class="quiet" aria-label={`编辑 ${item.symbol} 持仓`} onClick={() => editHolding(item)}>编辑</button><button type="button" class="remove" aria-label={`删除 ${item.symbol} 持仓`} onClick={() => void removePosition(item.id)}>删除</button></div>)}</div> : <p class="muted">录入第一笔持仓后，会基于当前研究快照显示对应标的估值。</p>}</section>
     <footer>念念智股只提供可追溯研究信息，不提供个性化投资建议或券商交易服务。</footer>
   </main>;
 }

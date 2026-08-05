@@ -5,6 +5,8 @@ import helmet from 'helmet';
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
 import { createMarketService, MarketError, normalizeSymbol } from './market.mjs';
+import { AuthError, createClerkVerifier } from './auth.mjs';
+import { WorkspaceError, createWorkspaceStore } from './supabase.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -15,6 +17,8 @@ const providerConfigured = Boolean(process.env.FMP_API_KEY || process.env.FINNHU
 const redis = upstashConfigured ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN }) : null;
 const market = createMarketService({ redis, isProduction });
 const rateLimit = redis ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(30, '1 m'), prefix: 'stocks:ratelimit:market' }) : null;
+const verifyClerkRequest = createClerkVerifier({ issuerDomain: process.env.CLERK_JWT_ISSUER_DOMAIN });
+const workspace = createWorkspaceStore({ url: process.env.SUPABASE_URL, serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY });
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -33,6 +37,7 @@ app.get('/api/health', (_request, response) => response.json({
   environment: isProduction ? 'production' : 'development',
   redis: upstashConfigured ? 'configured' : 'development_fallback',
   market: providerConfigured ? 'configured' : 'not_configured',
+  workspace: workspace.enabled ? 'configured' : 'not_configured',
   yahooFallback: false,
 }));
 app.get('/api/market/research', async (request, response, next) => {
@@ -50,6 +55,20 @@ app.get('/api/market/research', async (request, response, next) => {
     response.json(await market.research(symbol));
   } catch (error) { next(error); }
 });
+app.get('/api/account/workspace', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.workspaceFor(userId));
+  } catch (error) { next(error); }
+});
+app.post('/api/account/workspace/import', async (request, response, next) => {
+  try {
+    const { userId } = await verifyClerkRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(201).json(await workspace.importFirstWorkspace(userId, request.body));
+  } catch (error) { next(error); }
+});
 app.use(express.static(resolve(here, '..', 'dist'), { index: 'index.html', maxAge: isProduction ? '1h' : 0, etag: true }));
 app.get('*splat', (request, response, next) => {
   if (request.path.startsWith('/api/')) return next();
@@ -58,6 +77,7 @@ app.get('*splat', (request, response, next) => {
 app.use((_request, response) => response.status(404).json({ error: 'not_found', message: '未找到该接口。' }));
 app.use((error, _request, response, _next) => {
   if (error instanceof MarketError) return response.status(error.status).json({ error: error.code, message: error.message, retryable: error.status >= 429 });
+  if (error instanceof AuthError || error instanceof WorkspaceError) return response.status(error.status).json({ error: error.code, message: error.message, retryable: error.status >= 500 });
   console.error('stocks-server-error', error?.message || 'unknown');
   return response.status(500).json({ error: 'internal_error', message: '服务暂时不可用，请稍后重试。', retryable: true });
 });

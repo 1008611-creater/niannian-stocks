@@ -176,6 +176,8 @@ alter table public.niannian_device_tokens enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
+revoke all on function public.niannian_set_updated_at() from public, anon, authenticated;
 grant usage on schema public to service_role;
 grant all privileges on all tables in schema public to service_role;
 grant all privileges on all sequences in schema public to service_role;
+grant execute on function public.niannian_set_updated_at() to service_role;

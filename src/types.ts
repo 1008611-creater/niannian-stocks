@@ -8,3 +8,8 @@ export type Snapshot = {
   backtest: { strategy: { name: string; assumptions: string; version: string }; sample: { start: string; end: string; candleCount: number; benchmark: string }; metrics: { cumulativeReturnPct: number; buyHoldReturnPct: number; maxDrawdownPct: number; annualizedVolatilityPct: number; completedTrades: number }; equity: { time: string; value: number }[] };
   events: MarketEvent[]; eventsStatus: 'available' | 'unavailable' | 'not_configured'; providerPolicy: { yahooFallbackEnabled: boolean; commercialDisplay: string };
 };
+export type AgentReport = {
+  title: string; summary: string; stance: '观察偏多' | '中性观察' | '观察偏空' | '数据不足' | string;
+  opportunities: { claim: string; why: string }[]; risks: { claim: string; why: string }[]; nextChecks: string[];
+  evidence: { label: string; path: string; value: string }[]; generatedAt: string; snapshotId: string; source: string; updatedAt: string;
+};

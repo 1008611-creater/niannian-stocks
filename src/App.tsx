@@ -3,7 +3,7 @@ import { ApiError, loadResearch } from './api';
 import { authHeader, loadClerk } from './auth';
 import { EquityChart, PriceChart } from './chart';
 import { legacyImportAvailable, localDefaultPortfolio, readHoldings, readPortfolios, readWatchlist, saveHoldings, savePortfolios, saveWatchlist, validSymbol } from './storage';
-import type { Holding, Portfolio, Snapshot } from './types';
+import type { AgentReport, Holding, Portfolio, Snapshot } from './types';
 
 const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
@@ -68,6 +68,8 @@ export default function App() {
   const [clerk, setClerk] = useState<Awaited<ReturnType<typeof loadClerk>>>(null);
   const [accountUser, setAccountUser] = useState<{ id: string; email: string } | null>(null);
   const [accountState, setAccountState] = useState<'loading' | 'signed_out' | 'syncing' | 'ready' | 'error' | 'unavailable'>('loading');
+  const [agentReport, setAgentReport] = useState<AgentReport | null>(null);
+  const [agentLoading, setAgentLoading] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
   const importedAccountRef = useRef<string | null>(null);
 
@@ -214,6 +216,20 @@ export default function App() {
   function importLegacy() { setShowImport(false); setMessage(accountUser ? '登录时会优先保留云端数据；当前本机草稿仅在云端为空时首次导入。' : '登录后，本机自选和持仓会一次性导入当前账户。'); }
   async function startSignIn() { const client = clerk || await loadClerk(); if (!client) { setMessage('登录服务尚未完成公开前端配置，请稍后重试。'); return; } setClerk(client); client.openSignIn({ fallbackRedirectUrl: window.location.origin, signUpFallbackRedirectUrl: window.location.origin }); }
   async function signOut() { if (!clerk) return; await clerk.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
+  async function runAgentResearch() {
+    if (!snapshot) return;
+    if (!accountUser || !clerk) { setMessage('登录后即可生成当前标的的智能研究报告。'); return; }
+    setAgentLoading(true); setMessage('');
+    try {
+      const headers = new Headers(await authHeader(clerk));
+      headers.set('content-type', 'application/json');
+      const response = await fetch('/api/agent/research', { method: 'POST', headers, credentials: 'same-origin', body: JSON.stringify({ symbol: snapshot.symbol }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw accountError(response, payload);
+      setAgentReport(payload as AgentReport);
+    } catch (reason) { setMessage((reason as Error).message || '智能研究暂时不可用，请稍后再试。'); }
+    finally { setAgentLoading(false); }
+  }
 
   return <main>
     <header class="topbar">
@@ -247,6 +263,7 @@ export default function App() {
           </>}
         </section>
         {snapshot && <section class="surface evidence" aria-labelledby="evidence-title"><div class="section-head"><h2 id="evidence-title">为什么出现这个信号</h2></div><ul>{evidence.map((item) => <li key={item}>{item}</li>)}</ul></section>}
+        {snapshot && <section class="surface agent-panel" aria-labelledby="agent-title"><div class="section-head"><h2 id="agent-title">智能研究</h2><button type="button" class="secondary" onClick={() => void runAgentResearch()} disabled={agentLoading}>{agentLoading ? '研究中…' : agentReport ? '重新研究' : '生成研究报告'}</button></div>{agentReport && <div class="agent-report"><div class="agent-summary"><strong>{agentReport.title}</strong><span class={`stance ${agentReport.stance}`}>{agentReport.stance}</span><p>{agentReport.summary}</p></div><div class="agent-columns"><div><h3>支持观察</h3><ul>{agentReport.opportunities.map((item, index) => <li key={`${item.claim}-${index}`}><strong>{item.claim}</strong><span>{item.why}</span></li>)}</ul></div><div><h3>风险与失效条件</h3><ul>{agentReport.risks.map((item, index) => <li key={`${item.claim}-${index}`}><strong>{item.claim}</strong><span>{item.why}</span></li>)}</ul></div></div><div class="agent-checks"><h3>下一步核查</h3><ul>{agentReport.nextChecks.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div></div>}</section>}
         {snapshot && <section class="surface backtest" aria-labelledby="backtest-title"><div class="section-head"><h2 id="backtest-title">策略研究回测</h2></div><div class="metric-grid"><div><span>策略收益</span><b class={tone(snapshot.backtest.metrics.cumulativeReturnPct)}>{signed(snapshot.backtest.metrics.cumulativeReturnPct)}</b></div><div><span>买入持有</span><b class={tone(snapshot.backtest.metrics.buyHoldReturnPct)}>{signed(snapshot.backtest.metrics.buyHoldReturnPct)}</b></div><div><span>最大回撤</span><b class="negative">{signed(snapshot.backtest.metrics.maxDrawdownPct)}</b></div><div><span>年化波动</span><b>{Math.abs(snapshot.backtest.metrics.annualizedVolatilityPct).toFixed(2)}%</b></div></div><EquityChart points={snapshot.backtest.equity} /></section>}
       </div>
       <aside class="secondary-column">

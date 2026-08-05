@@ -100,6 +100,10 @@ function withinEventWindow(date, from, to) {
   return Boolean(date && date >= from && date <= to);
 }
 
+function matchesSymbol(row, symbol) {
+  return String(row?.symbol || row?.ticker || '').trim().toUpperCase() === symbol;
+}
+
 async function getFmpEvents(symbol, apiKey) {
   if (!apiKey) return null;
   const fromDate = new Date();
@@ -114,11 +118,11 @@ async function getFmpEvents(symbol, apiKey) {
   const rows = [];
   if (Array.isArray(earnings)) earnings.forEach((row) => {
     const date = dateOnly(row?.date || row?.epsAnnouncementDate);
-    if (withinEventWindow(date, from, to)) rows.push({ kind: 'earnings', date, title: '财报公布', timing: eventTiming(row?.time), detail: row?.epsEstimated == null ? '预计公布季度业绩' : `预期 EPS ${row.epsEstimated}` });
+    if (matchesSymbol(row, symbol) && withinEventWindow(date, from, to)) rows.push({ kind: 'earnings', date, title: '财报公布', timing: eventTiming(row?.time), detail: row?.epsEstimated == null ? '预计公布季度业绩' : `预期 EPS ${row.epsEstimated}` });
   });
   if (Array.isArray(dividends)) dividends.forEach((row) => {
     const date = dateOnly(row?.date || row?.paymentDate || row?.recordDate);
-    if (withinEventWindow(date, from, to)) rows.push({ kind: 'dividend', date, title: '分红相关日期', timing: '时间待确认', detail: row?.dividend == null ? '存在分红事件' : `每股 ${row.dividend} 美元` });
+    if (matchesSymbol(row, symbol) && withinEventWindow(date, from, to)) rows.push({ kind: 'dividend', date, title: '分红相关日期', timing: '时间待确认', detail: row?.dividend == null ? '存在分红事件' : `每股 ${row.dividend} 美元` });
   });
   return rows.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 8);
 }

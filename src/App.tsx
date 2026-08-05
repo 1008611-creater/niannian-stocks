@@ -218,7 +218,10 @@ export default function App() {
   async function signOut() { if (!clerk) return; await clerk.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
   async function runAgentResearch() {
     if (!snapshot) return;
-    if (!accountUser || !clerk) { setMessage('登录后即可生成当前标的的智能研究报告。'); return; }
+    if (!accountUser || !clerk) {
+      await startSignIn();
+      return;
+    }
     setAgentLoading(true); setMessage('');
     try {
       const headers = new Headers(await authHeader(clerk));

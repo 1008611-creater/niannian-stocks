@@ -85,6 +85,57 @@ async function getFinnhubCandles(symbol, apiKey) {
   })));
 }
 
+function dateOnly(value) {
+  return typeof value === 'string' ? value.slice(0, 10) : '';
+}
+
+function eventTiming(value) {
+  const timing = String(value || '').toUpperCase();
+  if (timing.includes('BMO') || timing.includes('BEFORE')) return '盘前';
+  if (timing.includes('AMC') || timing.includes('AFTER')) return '盘后';
+  return '时间待确认';
+}
+
+function withinEventWindow(date, from, to) {
+  return Boolean(date && date >= from && date <= to);
+}
+
+async function getFmpEvents(symbol, apiKey) {
+  if (!apiKey) return null;
+  const fromDate = new Date();
+  const toDate = new Date(fromDate.getTime() + 60 * DAY);
+  const from = fromDate.toISOString().slice(0, 10);
+  const to = toDate.toISOString().slice(0, 10);
+  const earningsUrl = new URL('https://financialmodelingprep.com/stable/earnings-calendar');
+  earningsUrl.searchParams.set('symbol', symbol); earningsUrl.searchParams.set('from', from); earningsUrl.searchParams.set('to', to); earningsUrl.searchParams.set('apikey', apiKey);
+  const dividendsUrl = new URL('https://financialmodelingprep.com/stable/dividends-calendar');
+  dividendsUrl.searchParams.set('symbol', symbol); dividendsUrl.searchParams.set('from', from); dividendsUrl.searchParams.set('to', to); dividendsUrl.searchParams.set('apikey', apiKey);
+  const [earnings, dividends] = await Promise.all([requestJson(earningsUrl), requestJson(dividendsUrl)]);
+  const rows = [];
+  if (Array.isArray(earnings)) earnings.forEach((row) => {
+    const date = dateOnly(row?.date || row?.epsAnnouncementDate);
+    if (withinEventWindow(date, from, to)) rows.push({ kind: 'earnings', date, title: '财报公布', timing: eventTiming(row?.time), detail: row?.epsEstimated == null ? '预计公布季度业绩' : `预期 EPS ${row.epsEstimated}` });
+  });
+  if (Array.isArray(dividends)) dividends.forEach((row) => {
+    const date = dateOnly(row?.date || row?.paymentDate || row?.recordDate);
+    if (withinEventWindow(date, from, to)) rows.push({ kind: 'dividend', date, title: '分红相关日期', timing: '时间待确认', detail: row?.dividend == null ? '存在分红事件' : `每股 ${row.dividend} 美元` });
+  });
+  return rows.sort((a, b) => a.date.localeCompare(b.date)).slice(0, 8);
+}
+
+async function getFinnhubEvents(symbol, apiKey) {
+  if (!apiKey) return null;
+  const fromDate = new Date();
+  const toDate = new Date(fromDate.getTime() + 60 * DAY);
+  const from = fromDate.toISOString().slice(0, 10);
+  const to = toDate.toISOString().slice(0, 10);
+  const url = new URL('https://finnhub.io/api/v1/calendar/earnings');
+  url.searchParams.set('symbol', symbol); url.searchParams.set('from', from); url.searchParams.set('to', to); url.searchParams.set('token', apiKey);
+  const payload = await requestJson(url, { Accept: 'application/json', 'User-Agent': 'niannian-stocks/0.1' });
+  const rows = Array.isArray(payload?.earningsCalendar) ? payload.earningsCalendar : [];
+  return rows.map((row) => ({ kind: 'earnings', date: dateOnly(row?.date), title: '财报公布', timing: eventTiming(row?.hour), detail: row?.epsEstimate == null ? '预计公布季度业绩' : `预期 EPS ${row.epsEstimate}` })).filter((row) => withinEventWindow(row.date, from, to)).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 8);
+}
+
 function calculateRsi(candles, period = 14) {
   if (candles.length <= period) return null;
   let gains = 0; let losses = 0;
@@ -193,15 +244,18 @@ export function createMarketService({ redis, isProduction }) {
           throw new MarketError('request_in_progress', 503, '行情快照正在更新，请稍后重试。');
         }
         try {
-          const fmp = await getFmpCandles(symbol, process.env.FMP_API_KEY).catch((error) => error instanceof MarketError ? error : null);
-          const finnhub = fmp ? null : await getFinnhubCandles(symbol, process.env.FINNHUB_API_KEY).catch((error) => error instanceof MarketError ? error : null);
+          const fmpKey = process.env.FMP_API_KEY;
+          const finnhubKey = process.env.FINNHUB_API_KEY;
+          const fmp = await getFmpCandles(symbol, fmpKey).catch((error) => error instanceof MarketError ? error : null);
+          const finnhub = fmp ? null : await getFinnhubCandles(symbol, finnhubKey).catch((error) => error instanceof MarketError ? error : null);
           const candles = fmp || finnhub;
           if (!candles) {
             if (isProduction) throw new MarketError('provider_unavailable', 502, '当前没有可用的商业行情数据源。');
             throw new MarketError('provider_unavailable');
           }
           const source = fmp ? 'FMP' : 'Finnhub'; const updatedAt = new Date().toISOString(); const summary = buildSummary(candles); const backtest = buildBacktest(candles, symbol);
-          const payload = { snapshotId: createHash('sha256').update(`${symbol}:${source}:${candles.at(-1).time}:${candles.at(-1).close}`).digest('hex').slice(0, 16), symbol, source, updatedAt, cache: 'miss', ...marketState(candles.at(-1).time), candles, summary, backtest, events: [], eventsStatus: 'not_configured', providerPolicy: { yahooFallbackEnabled: false, commercialDisplay: '当前候选不使用 Yahoo 回退；请在正式商业规模上线前确认数据供应商展示授权范围。' } };
+          const eventsResult = await (fmp ? getFmpEvents(symbol, fmpKey) : getFinnhubEvents(symbol, finnhubKey)).catch(() => null);
+          const payload = { snapshotId: createHash('sha256').update(`${symbol}:${source}:${candles.at(-1).time}:${candles.at(-1).close}`).digest('hex').slice(0, 16), symbol, source, updatedAt, cache: 'miss', ...marketState(candles.at(-1).time), candles, summary, backtest, events: eventsResult || [], eventsStatus: eventsResult ? 'available' : 'unavailable', providerPolicy: { yahooFallbackEnabled: false, commercialDisplay: '当前候选不使用 Yahoo 回退；请在正式商业规模上线前确认数据供应商展示授权范围。' } };
           await cacheSet(key, payload);
           return payload;
         } finally {

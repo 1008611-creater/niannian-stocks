@@ -31,6 +31,11 @@ function signalLabel(snapshot: Snapshot) {
   return evidence;
 }
 
+function eventStatusLabel(snapshot: Snapshot) {
+  if (snapshot.eventsStatus === 'available') return snapshot.events.length ? '未来 60 天' : '未来 60 天暂无事件';
+  return snapshot.eventsStatus === 'unavailable' ? '数据源暂不可用' : '事件源待配置';
+}
+
 export default function App() {
   const [symbol, setSymbol] = useState(defaultSnapshot);
   const [input, setInput] = useState(defaultSnapshot);
@@ -131,7 +136,7 @@ export default function App() {
       <aside class="secondary-column">
         <section class="surface"><div class="section-head"><div><h2>自选股</h2><p>免费层 0–5 / Pro 0–50</p></div></div><form class="compact-form" onSubmit={addWatch}><input aria-label="添加自选美股代码" placeholder="例如 META" value={watchInput} maxlength={10} onInput={(event) => setWatchInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">添加</button></form><ul class="symbol-list">{watchlist.map((item) => <li key={item}><button type="button" class={item === symbol ? 'active-symbol' : ''} onClick={() => chooseSymbol(item)}>{item}</button><button type="button" class="remove" aria-label={`删除 ${item}`} onClick={() => setWatchlist(watchlist.filter((value) => value !== item))}>移除</button></li>)}</ul></section>
         <section class="surface"><div class="section-head"><div><h2>技术摘要</h2><p>{snapshot ? '同一快照计算' : '等待行情'}</p></div></div>{snapshot ? <dl class="facts"><div><dt>RSI(14)</dt><dd>{snapshot.summary.rsi14 ?? '样本不足'}</dd></div><div><dt>成交量比</dt><dd>{snapshot.summary.volumeRatio ? `${snapshot.summary.volumeRatio}×` : '—'}</dd></div><div><dt>MA20 / MA50</dt><dd>{snapshot.summary.ma20} / {snapshot.summary.ma50}</dd></div><div><dt>20 日区间</dt><dd>{snapshot.summary.support20} – {snapshot.summary.resistance20}</dd></div></dl> : <p class="muted">载入后显示指标。</p>}</section>
-        <section class="surface"><div class="section-head"><div><h2>事件与提醒</h2><p>结构化事件尚未接入</p></div><span class="pro-tag">Pro</span></div><p class="muted">财报日期、盘前盘后、分红拆股、后台扫描与系统推送将在服务端权益、数据源和 Firebase 配置完成后开放。</p><button class="secondary" onClick={() => setMessage('这是 Pro 功能。当前无需弹窗；完成账户、支付和推送配置后会在这里开通。')}>了解 Pro 权益</button></section>
+        <section class="surface events-panel"><div class="section-head"><div><h2>事件与提醒</h2><p>{snapshot ? eventStatusLabel(snapshot) : '等待行情'}</p></div><span class="pro-tag">Pro</span></div>{snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">{snapshot?.eventsStatus === 'unavailable' ? '事件数据暂时不可用，行情仍可继续研究。' : '财报、分红与后台提醒会在数据源和账户权益完成后显示。'}</p>}<button type="button" class="secondary" onClick={() => setMessage('提醒设置会在账户同步和 Pro 权益接入后开放；当前不弹出升级窗口。')}>提醒设置</button></section>
       </aside>
     </section>
 

@@ -2,7 +2,7 @@ type ClerkSession = { getToken: () => Promise<string | null> };
 type ClerkUser = { id: string; primaryEmailAddress?: { emailAddress?: string | null } | null };
 type ClerkClient = {
   load: () => Promise<void>;
-  openSignIn: (options: { afterSignInUrl: string; afterSignUpUrl: string }) => void;
+  openSignIn: (options: { fallbackRedirectUrl: string; signUpFallbackRedirectUrl: string }) => void;
   signOut: () => Promise<void>;
   session: ClerkSession | null;
   user: ClerkUser | null;

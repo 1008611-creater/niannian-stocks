@@ -8,6 +8,7 @@ import type { AgentReport, Holding, Portfolio, Snapshot } from './types';
 const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
 const defaultSnapshot = 'NVDA';
+const pendingAgentResearchStorageKey = 'niannian.pending-agent-research';
 
 function signed(value: number) { return percentage.format(value / 100); }
 function tone(value: number) { return value >= 0 ? 'positive' : 'negative'; }
@@ -219,6 +220,7 @@ export default function App() {
   async function runAgentResearch() {
     if (!snapshot) return;
     if (!accountUser || !clerk) {
+      window.sessionStorage.setItem(pendingAgentResearchStorageKey, snapshot.symbol);
       await startSignIn();
       return;
     }
@@ -233,6 +235,19 @@ export default function App() {
     } catch (reason) { setMessage((reason as Error).message || '智能研究暂时不可用，请稍后再试。'); }
     finally { setAgentLoading(false); }
   }
+
+  useEffect(() => {
+    const pendingSymbol = window.sessionStorage.getItem(pendingAgentResearchStorageKey);
+    if (!pendingSymbol || !accountUser || !clerk || agentLoading) return;
+    if (pendingSymbol !== symbol) {
+      setInput(pendingSymbol);
+      setSymbol(pendingSymbol);
+      return;
+    }
+    if (!snapshot || snapshot.symbol !== pendingSymbol) return;
+    window.sessionStorage.removeItem(pendingAgentResearchStorageKey);
+    void runAgentResearch();
+  }, [accountUser, clerk, agentLoading, snapshot, symbol]);
 
   return <main>
     <header class="topbar">

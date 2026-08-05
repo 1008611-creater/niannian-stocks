@@ -11,6 +11,8 @@ select { min-height: 44px; border: 1px solid #29435d; border-radius: 10px; paddi
 main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: max(24px, env(safe-area-inset-top)) 0 max(38px, env(safe-area-inset-bottom)); }
 .topbar, .decision-title, .section-head, .quote-row, .migration { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .topbar { min-height: 52px; }
+.brand-lockup { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-mark { width: 37px; height: 43px; flex: 0 0 auto; object-fit: contain; }
 .brand { margin: 0; font-size: clamp(23px, 3vw, 31px); font-weight: 820; letter-spacing: -.035em; }
 .service-label, .section-head p, .symbol-control p, .quote-row p, .muted, .data-footnote, footer, .migration span, small { color: #99abc0; }
 .service-label { margin: 5px 0 0; font-size: 14px; }

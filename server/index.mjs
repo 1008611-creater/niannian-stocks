@@ -24,7 +24,7 @@ const workspace = createWorkspaceStore({ url: process.env.SUPABASE_URL, serviceR
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], baseUri: ["'self'"], frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://clerk.stocks.cauai.fun'], connectSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], frameSrc: ['https://clerk.stocks.cauai.fun'] } }, crossOriginEmbedderPolicy: false }));
+app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], baseUri: ["'self'"], frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://clerk.stocks.cauai.fun', 'https://img.clerk.com'], connectSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], frameSrc: ['https://clerk.stocks.cauai.fun'] } }, crossOriginEmbedderPolicy: false }));
 app.use(express.json({ limit: '16kb' }));
 
 function requestIdentity(request) {

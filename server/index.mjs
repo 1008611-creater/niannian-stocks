@@ -11,6 +11,7 @@ const app = express();
 const port = Number(process.env.PORT || 4313);
 const isProduction = process.env.NODE_ENV === 'production';
 const upstashConfigured = Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+const providerConfigured = Boolean(process.env.FMP_API_KEY || process.env.FINNHUB_API_KEY);
 const redis = upstashConfigured ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN }) : null;
 const market = createMarketService({ redis, isProduction });
 const rateLimit = redis ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(30, '1 m'), prefix: 'stocks:ratelimit:market' }) : null;
@@ -26,7 +27,14 @@ function requestIdentity(request) {
   return candidate || 'unknown';
 }
 
-app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'niannian-stocks', redis: upstashConfigured ? 'configured' : 'development_fallback' }));
+app.get('/api/health', (_request, response) => response.json({
+  ok: true,
+  service: 'niannian-stocks',
+  environment: isProduction ? 'production' : 'development',
+  redis: upstashConfigured ? 'configured' : 'development_fallback',
+  market: providerConfigured ? 'configured' : 'not_configured',
+  yahooFallback: false,
+}));
 app.get('/api/market/research', async (request, response, next) => {
   try {
     const symbol = normalizeSymbol(request.query.symbol);

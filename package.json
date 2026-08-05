@@ -10,7 +10,8 @@
     "start": "node server/index.mjs",
     "check": "tsc -b && node --check server/index.mjs && node --check server/market.mjs",
     "android:sync": "npm run build && cap sync android",
-    "android:debug": "npm run android:sync && cd android && gradlew.bat assembleDebug"
+    "android:debug": "npm run android:sync && cd android && gradlew.bat assembleDebug",
+    "android:release": "npm run android:sync && cd android && gradlew.bat :app:assembleRelease --no-daemon"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.3",

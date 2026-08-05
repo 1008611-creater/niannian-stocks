@@ -65,21 +65,17 @@ app.get('/api/market/research', async (request, response, next) => {
 });
 app.post('/api/agent/research', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
     if (!agentConfigured) throw new MarketError('agent_not_configured', 503, '智能研究服务正在配置中。');
     if (!agentRateLimit && isProduction) throw new MarketError('service_not_configured', 503, '智能研究服务尚未完成生产缓存配置。');
     if (agentRateLimit) {
-      const quota = await agentRateLimit.limit(userId);
+      const quota = await agentRateLimit.limit(requestIdentity(request));
       response.setHeader('RateLimit-Limit', String(quota.limit));
       response.setHeader('RateLimit-Remaining', String(Math.max(0, quota.remaining)));
       if (!quota.success) throw new MarketError('agent_rate_limited', 429, '研究请求较多，请稍后再试。');
     }
     const symbol = normalizeSymbol(request.body?.symbol);
     const question = typeof request.body?.question === 'string' ? request.body.question.trim().slice(0, 700) : '';
-    const [snapshot, cloud] = await Promise.all([
-      market.research(symbol),
-      workspace.enabled ? workspace.workspaceFor(userId) : Promise.resolve({ holdings: [], watchlist: [] }),
-    ]);
+    const snapshot = await market.research(symbol);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 50_000);
     let upstream;
@@ -87,7 +83,7 @@ app.post('/api/agent/research', async (request, response, next) => {
       upstream = await fetch(new URL('/v1/research', process.env.AGENT_SERVICE_URL).toString(), {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-niannian-agent-token': process.env.NIANNIAN_AGENT_SERVICE_TOKEN },
-        body: JSON.stringify({ question, snapshot, workspace: { holdings: cloud.holdings, watchlist: cloud.watchlist } }),
+        body: JSON.stringify({ question, snapshot, workspace: { holdings: [], watchlist: [] } }),
         signal: controller.signal,
       });
     } catch {

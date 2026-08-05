@@ -9,6 +9,7 @@ const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: '
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
 const defaultSnapshot = 'NVDA';
 const pendingAgentResearchStorageKey = 'niannian.pending-agent-research';
+const internalBeta = true;
 
 function signed(value: number) { return percentage.format(value / 100); }
 function tone(value: number) { return value >= 0 ? 'positive' : 'negative'; }
@@ -124,6 +125,7 @@ export default function App() {
   }, [clerk]);
 
   useEffect(() => {
+    if (internalBeta) { setAccountState('unavailable'); return; }
     let active = true;
     let unsubscribe: (() => void) | undefined;
     const setIdentity = (client: NonNullable<Awaited<ReturnType<typeof loadClerk>>>) => {
@@ -219,14 +221,9 @@ export default function App() {
   async function signOut() { if (!clerk) return; await clerk.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
   async function runAgentResearch() {
     if (!snapshot) return;
-    if (!accountUser || !clerk) {
-      window.sessionStorage.setItem(pendingAgentResearchStorageKey, snapshot.symbol);
-      await startSignIn();
-      return;
-    }
     setAgentLoading(true); setMessage('');
     try {
-      const headers = new Headers(await authHeader(clerk));
+      const headers = new Headers();
       headers.set('content-type', 'application/json');
       const response = await fetch('/api/agent/research', { method: 'POST', headers, credentials: 'same-origin', body: JSON.stringify({ symbol: snapshot.symbol }) });
       const payload = await response.json().catch(() => ({}));
@@ -237,6 +234,7 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (internalBeta) return;
     const pendingSymbol = window.sessionStorage.getItem(pendingAgentResearchStorageKey);
     if (!pendingSymbol || !accountUser || !clerk || agentLoading) return;
     if (pendingSymbol !== symbol) {
@@ -252,10 +250,10 @@ export default function App() {
   return <main>
     <header class="topbar">
       <div class="brand-lockup"><img class="brand-mark" src="/niannian-logo.svg" alt="念念智股" /><p class="brand">念念智股</p></div>
-      <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span><span>{accountState === 'ready' && accountUser ? '已同步' : accountState === 'syncing' ? '同步中' : accountState === 'error' ? '同步未完成' : '免费层'}</span>{accountUser ? <><span class="account-email" title={accountUser.email}>{accountUser.email}</span><button class="quiet" onClick={signOut}>退出登录</button></> : <button class="quiet" onClick={startSignIn} disabled={accountState === 'loading'}>{accountState === 'loading' ? '准备登录…' : accountState === 'unavailable' ? '登录待配置' : '登录与同步'}</button>}</div>
+      <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span>{internalBeta ? <span>内测版</span> : <><span>{accountState === 'ready' && accountUser ? '已同步' : accountState === 'syncing' ? '同步中' : accountState === 'error' ? '同步未完成' : '免费层'}</span>{accountUser ? <><span class="account-email" title={accountUser.email}>{accountUser.email}</span><button class="quiet" onClick={signOut}>退出登录</button></> : <button class="quiet" onClick={startSignIn} disabled={accountState === 'loading'}>{accountState === 'loading' ? '准备登录…' : accountState === 'unavailable' ? '登录待配置' : '登录与同步'}</button>}</>}</div>
     </header>
     {message && <p class="notice" role="status" aria-live="polite">{message}</p>}
-    {showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
+    {!internalBeta && showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
 
     <section class="decision-panel" aria-labelledby="today-title">
       <div class="decision-title"><h1 id="today-title">今日决策面板</h1></div>

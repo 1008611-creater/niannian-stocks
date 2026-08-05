@@ -12,4 +12,5 @@ export type AgentReport = {
   title: string; summary: string; stance: '观察偏多' | '中性观察' | '观察偏空' | '数据不足' | string;
   opportunities: { claim: string; why: string }[]; risks: { claim: string; why: string }[]; nextChecks: string[];
   evidence: { label: string; path: string; value: string }[]; generatedAt: string; snapshotId: string; source: string; updatedAt: string;
+  modelProvider?: string; question?: string; fallback?: boolean;
 };

@@ -10,6 +10,11 @@ const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDispla
 const defaultSnapshot = 'NVDA';
 const pendingAgentResearchStorageKey = 'niannian.pending-agent-research';
 const internalBeta = true;
+const researchPrompts = [
+  { label: '趋势与风险', question: '请解释当前趋势、关键风险与失效条件，并指出下一次日线应核查什么。' },
+  { label: '回测复盘', question: '请比较研究策略与买入持有的表现，说明回撤和策略失效风险。' },
+  { label: '事件关注', question: '请根据研究包中的事件，指出近期值得跟踪的时间点和仍缺失的事实。' },
+] as const;
 
 function signed(value: number) { return percentage.format(value / 100); }
 function tone(value: number) { return value >= 0 ? 'positive' : 'negative'; }
@@ -27,6 +32,24 @@ function signalLabel(snapshot: Snapshot) {
     `回测区间 ${backtest.sample.start}–${backtest.sample.end}，策略收益与买入持有分别为 ${signed(backtest.metrics.cumulativeReturnPct)} 和 ${signed(backtest.metrics.buyHoldReturnPct)}`,
   ];
   return evidence;
+}
+
+function researchVerdict(snapshot: Snapshot) {
+  const { summary, backtest, events } = snapshot;
+  const strategyGap = backtest.metrics.cumulativeReturnPct - backtest.metrics.buyHoldReturnPct;
+  const earnings = events.find((item) => item.kind === 'earnings');
+  const stance = summary.trend === 'bullish' ? '观察偏多' : '观察偏空';
+  const headline = summary.trend === 'bullish' ? '趋势暂时占优，重点确认能否延续。' : '趋势偏弱，重点确认能否止跌转强。';
+  return {
+    stance,
+    headline,
+    items: [
+      { label: '趋势状态', value: summary.trend === 'bullish' ? 'MA20 高于 MA50' : 'MA20 低于 MA50' },
+      { label: '动量', value: summary.rsi14 === null ? '样本不足' : `RSI ${summary.rsi14}` },
+      { label: '策略差距', value: `${strategyGap >= 0 ? '+' : ''}${strategyGap.toFixed(2)}%` },
+      { label: '近期事件', value: earnings ? `${earnings.date} 财报` : '暂无可用事件' },
+    ],
+  };
 }
 
 type DeepLinkListener = { remove?: () => void | Promise<void> };
@@ -72,6 +95,7 @@ export default function App() {
   const [accountState, setAccountState] = useState<'loading' | 'signed_out' | 'syncing' | 'ready' | 'error' | 'unavailable'>('loading');
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
+  const [agentQuestion, setAgentQuestion] = useState<string>(researchPrompts[0].question);
   const requestRef = useRef<AbortController | null>(null);
   const importedAccountRef = useRef<string | null>(null);
 
@@ -90,6 +114,10 @@ export default function App() {
   useEffect(() => {
     const controller = fetchSnapshot(symbol);
     return () => controller.abort();
+  }, [symbol]);
+  useEffect(() => {
+    setAgentReport(null);
+    setAgentQuestion(researchPrompts[0].question);
   }, [symbol]);
   useEffect(() => saveWatchlist(watchlist), [watchlist]);
   useEffect(() => saveHoldings(holdings), [holdings]);
@@ -180,15 +208,8 @@ export default function App() {
   }, []);
 
   const portfolioHoldings = useMemo(() => holdings.filter((item) => item.portfolioId === activePortfolio.id), [holdings, activePortfolio.id]);
-  const holdingSummary = useMemo(() => {
-    if (!snapshot || !portfolioHoldings.length) return null;
-    const active = portfolioHoldings.filter((item) => item.symbol === snapshot.symbol);
-    const invested = active.reduce((total, item) => total + item.quantity * item.cost, 0);
-    const value = active.reduce((total, item) => total + item.quantity * snapshot.summary.price, 0);
-    return { invested, value, pnl: value - invested, activeCount: active.length };
-  }, [portfolioHoldings, snapshot]);
-  const portfolioCostBasis = useMemo(() => portfolioHoldings.reduce((total, item) => total + item.quantity * item.cost, 0), [portfolioHoldings]);
   const evidence = useMemo(() => snapshot ? signalLabel(snapshot) : [], [snapshot]);
+  const verdict = useMemo(() => snapshot ? researchVerdict(snapshot) : null, [snapshot]);
 
   function chooseSymbol(next: string) { const value = next.trim().toUpperCase(); if (!validSymbol(value)) { setMessage('请输入有效的美股代码。'); return; } setInput(value); setSymbol(value); setMessage(''); }
   async function addWatch(event: Event) { event.preventDefault(); const next = watchInput.trim().toUpperCase(); if (!validSymbol(next)) { setMessage('自选代码格式不正确。'); return; } if (watchlist.includes(next)) { setMessage(`${next} 已在自选中。`); return; } if (!accountUser && watchlist.length >= 5) { setMessage('免费层最多 5 只自选。登录并升级 Pro 后可扩展至 50 只。'); return; } try { if (accountUser) applyWorkspace(await accountRequest('/api/account/watchlist', { method: 'POST', body: JSON.stringify({ symbol: next }) })); else setWatchlist([...watchlist, next]); setWatchInput(''); setMessage(`${next} 已加入${accountUser ? '云端' : '本机'}自选。`); } catch (reason) { setMessage((reason as Error).message); } }
@@ -219,13 +240,13 @@ export default function App() {
   function importLegacy() { setShowImport(false); setMessage(accountUser ? '登录时会优先保留云端数据；当前本机草稿仅在云端为空时首次导入。' : '登录后，本机自选和持仓会一次性导入当前账户。'); }
   async function startSignIn() { const client = clerk || await loadClerk(); if (!client) { setMessage('登录服务尚未完成公开前端配置，请稍后重试。'); return; } setClerk(client); client.openSignIn({ fallbackRedirectUrl: window.location.origin, signUpFallbackRedirectUrl: window.location.origin }); }
   async function signOut() { if (!clerk) return; await clerk.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
-  async function runAgentResearch() {
+  async function runAgentResearch(nextQuestion: string = agentQuestion) {
     if (!snapshot) return;
     setAgentLoading(true); setMessage('');
     try {
       const headers = new Headers();
       headers.set('content-type', 'application/json');
-      const response = await fetch('/api/agent/research', { method: 'POST', headers, credentials: 'same-origin', body: JSON.stringify({ symbol: snapshot.symbol }) });
+      const response = await fetch('/api/agent/research', { method: 'POST', headers, credentials: 'same-origin', body: JSON.stringify({ symbol: snapshot.symbol, question: nextQuestion }) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw accountError(response, payload);
       setAgentReport(payload as AgentReport);
@@ -256,12 +277,9 @@ export default function App() {
     {!internalBeta && showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
 
     <section class="decision-panel" aria-labelledby="today-title">
-      <div class="decision-title"><h1 id="today-title">今日决策面板</h1></div>
+      <div class="decision-title"><div><h1 id="today-title">{snapshot ? `${snapshot.symbol} 研究结论` : '研究结论'}</h1>{verdict && <p>{verdict.headline}</p>}</div>{verdict && <span class={`decision-stance ${verdict.stance}`}>{verdict.stance}</span>}</div>
       <div class="decision-grid">
-        <div><span>当前研究标的</span><strong>{snapshot?.symbol || symbol}</strong></div>
-        <div><span>趋势</span><strong class={snapshot?.summary.trend === 'bullish' ? 'positive' : 'negative'}>{snapshot?.summary.trend === 'bullish' ? 'MA20 高于 MA50' : snapshot ? 'MA20 低于 MA50' : '—'}</strong></div>
-        <div><span>{activePortfolio.name}</span><strong>{holdingSummary ? currency.format(holdingSummary.value) : portfolioHoldings.length ? currency.format(portfolioCostBasis) : '未录入'}</strong></div>
-        <div><span>下一步</span><strong>{snapshot?.eventsStatus === 'not_configured' ? '事件层待接入' : '查看事件'}</strong></div>
+        {verdict ? verdict.items.map((item) => <div key={item.label}><span>{item.label}</span><strong class={item.label === '趋势状态' ? tone(snapshot!.summary.trend === 'bullish' ? 1 : -1) : item.label === '策略差距' ? tone(snapshot!.backtest.metrics.cumulativeReturnPct - snapshot!.backtest.metrics.buyHoldReturnPct) : ''}>{item.value}</strong></div>) : <><div><span>当前研究标的</span><strong>{symbol}</strong></div><div><span>趋势状态</span><strong>载入中</strong></div><div><span>动量</span><strong>载入中</strong></div><div><span>近期事件</span><strong>载入中</strong></div></>}
       </div>
     </section>
 
@@ -279,13 +297,13 @@ export default function App() {
           </>}
         </section>
         {snapshot && <section class="surface evidence" aria-labelledby="evidence-title"><div class="section-head"><h2 id="evidence-title">为什么出现这个信号</h2></div><ul>{evidence.map((item) => <li key={item}>{item}</li>)}</ul></section>}
-        {snapshot && <section class="surface agent-panel" aria-labelledby="agent-title"><div class="section-head"><h2 id="agent-title">智能研究</h2><button type="button" class="secondary" onClick={() => void runAgentResearch()} disabled={agentLoading}>{agentLoading ? '研究中…' : agentReport ? '重新研究' : '生成研究报告'}</button></div>{agentReport && <div class="agent-report"><div class="agent-summary"><strong>{agentReport.title}</strong><span class={`stance ${agentReport.stance}`}>{agentReport.stance}</span><p>{agentReport.summary}</p></div><div class="agent-columns"><div><h3>支持观察</h3><ul>{agentReport.opportunities.map((item, index) => <li key={`${item.claim}-${index}`}><strong>{item.claim}</strong><span>{item.why}</span></li>)}</ul></div><div><h3>风险与失效条件</h3><ul>{agentReport.risks.map((item, index) => <li key={`${item.claim}-${index}`}><strong>{item.claim}</strong><span>{item.why}</span></li>)}</ul></div></div><div class="agent-checks"><h3>下一步核查</h3><ul>{agentReport.nextChecks.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div></div>}</section>}
+        {snapshot && <section class="surface agent-panel" aria-labelledby="agent-title"><div class="section-head"><h2 id="agent-title">智能研究</h2></div><div class="research-actions" aria-label="研究主题">{researchPrompts.map((item) => <button type="button" class={agentQuestion === item.question ? 'research-prompt active' : 'research-prompt'} onClick={() => { setAgentQuestion(item.question); void runAgentResearch(item.question); }} disabled={agentLoading}>{item.label}</button>)}</div><form class="research-question" onSubmit={(event) => { event.preventDefault(); void runAgentResearch(); }}><input aria-label="自定义研究问题" value={agentQuestion} maxlength={700} onInput={(event) => setAgentQuestion((event.target as HTMLInputElement).value)} /><button type="submit" class="secondary" disabled={agentLoading}>{agentLoading ? '研究中…' : agentReport ? '重新研究' : '生成研究报告'}</button></form>{agentReport && <div class="agent-report"><div class="agent-summary"><div class="agent-title-row"><strong>{agentReport.title}</strong><span class={`stance ${agentReport.stance}`}>{agentReport.stance}</span></div><p>{agentReport.summary}</p></div><div class="agent-columns"><div><h3>支持观察</h3><ul>{agentReport.opportunities.map((item, index) => <li key={`${item.claim}-${index}`}><strong>{item.claim}</strong><span>{item.why}</span></li>)}</ul></div><div><h3>风险与失效条件</h3><ul>{agentReport.risks.map((item, index) => <li key={`${item.claim}-${index}`}><strong>{item.claim}</strong><span>{item.why}</span></li>)}</ul></div></div><div class="agent-checks"><h3>下一步核查</h3><ul>{agentReport.nextChecks.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></div><div class="agent-evidence"><h3>本次研究依据</h3><dl>{agentReport.evidence.map((item) => <div key={item.path}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl></div></div>}</section>}
         {snapshot && <section class="surface backtest" aria-labelledby="backtest-title"><div class="section-head"><h2 id="backtest-title">策略研究回测</h2></div><div class="metric-grid"><div><span>策略收益</span><b class={tone(snapshot.backtest.metrics.cumulativeReturnPct)}>{signed(snapshot.backtest.metrics.cumulativeReturnPct)}</b></div><div><span>买入持有</span><b class={tone(snapshot.backtest.metrics.buyHoldReturnPct)}>{signed(snapshot.backtest.metrics.buyHoldReturnPct)}</b></div><div><span>最大回撤</span><b class="negative">{signed(snapshot.backtest.metrics.maxDrawdownPct)}</b></div><div><span>年化波动</span><b>{Math.abs(snapshot.backtest.metrics.annualizedVolatilityPct).toFixed(2)}%</b></div></div><EquityChart points={snapshot.backtest.equity} /></section>}
       </div>
       <aside class="secondary-column">
         <section class="surface"><div class="section-head"><h2>自选股</h2></div><form class="compact-form" onSubmit={addWatch}><input aria-label="添加自选美股代码" placeholder="例如 META" value={watchInput} maxlength={10} onInput={(event) => setWatchInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">添加</button></form><ul class="symbol-list">{watchlist.map((item) => <li key={item}><button type="button" class={item === symbol ? 'active-symbol' : ''} onClick={() => chooseSymbol(item)}>{item}</button><button type="button" class="remove" aria-label={`删除 ${item}`} onClick={() => void removeWatch(item)}>移除</button></li>)}</ul></section>
-        <section class="surface"><div class="section-head"><h2>技术摘要</h2></div>{snapshot && <dl class="facts"><div><dt>RSI(14)</dt><dd>{snapshot.summary.rsi14 ?? '样本不足'}</dd></div><div><dt>成交量比</dt><dd>{snapshot.summary.volumeRatio ? `${snapshot.summary.volumeRatio}×` : '—'}</dd></div><div><dt>MA20 / MA50</dt><dd>{snapshot.summary.ma20} / {snapshot.summary.ma50}</dd></div><div><dt>20 日区间</dt><dd>{snapshot.summary.support20} – {snapshot.summary.resistance20}</dd></div></dl>}</section>
-        <section class="surface events-panel"><div class="section-head"><h2>事件与提醒</h2><span class="pro-tag">Pro</span></div>{snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">暂无事件</p>}<button type="button" class="secondary" onClick={() => setMessage('提醒设置会在账户同步和 Pro 权益接入后开放；当前不弹出升级窗口。')}>提醒设置</button></section>
+        <section class="surface"><div class="section-head"><h2>技术摘要</h2></div>{snapshot && <dl class="facts"><div><dt>RSI(14)</dt><dd>{snapshot.summary.rsi14 ?? '样本不足'}</dd></div><div><dt>成交量比</dt><dd>{snapshot.summary.volumeRatio ? `${snapshot.summary.volumeRatio}×` : '样本不足'}</dd></div><div><dt>MA20 / MA50</dt><dd>{snapshot.summary.ma20} / {snapshot.summary.ma50}</dd></div><div><dt>20 日区间</dt><dd>{snapshot.summary.support20} 至 {snapshot.summary.resistance20}</dd></div></dl>}</section>
+        <section class="surface events-panel"><div class="section-head"><h2>事件与提醒</h2></div>{snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">暂无可用事件</p>}<button type="button" class="secondary" onClick={() => setMessage('提醒设置将在账户同步开放后启用。')}>提醒设置</button></section>
       </aside>
     </section>
 

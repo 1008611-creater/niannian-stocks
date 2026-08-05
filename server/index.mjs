@@ -14,7 +14,12 @@ const port = Number(process.env.PORT || 4313);
 const isProduction = process.env.NODE_ENV === 'production';
 const upstashConfigured = Boolean(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
 const providerConfigured = Boolean(process.env.FMP_API_KEY || process.env.FINNHUB_API_KEY);
-const agentConfigured = Boolean(process.env.AGENT_SERVICE_URL && process.env.NIANNIAN_AGENT_SERVICE_TOKEN);
+const agentServiceUrls = [
+  process.env.AGENT_SERVICE_URL,
+  process.env.AGENT_PUBLIC_SERVICE_URL,
+  'https://tradingagents-production-f7f4.up.railway.app',
+].filter((value, index, all) => Boolean(value) && all.indexOf(value) === index);
+const agentConfigured = Boolean(agentServiceUrls.length && process.env.NIANNIAN_AGENT_SERVICE_TOKEN);
 const redis = upstashConfigured ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN }) : null;
 const market = createMarketService({ redis, isProduction });
 const rateLimit = redis ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(30, '1 m'), prefix: 'stocks:ratelimit:market' }) : null;
@@ -80,15 +85,23 @@ app.post('/api/agent/research', async (request, response, next) => {
     const timer = setTimeout(() => controller.abort(), 50_000);
     let upstream;
     try {
-      upstream = await fetch(new URL('/v1/research', process.env.AGENT_SERVICE_URL).toString(), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-niannian-agent-token': process.env.NIANNIAN_AGENT_SERVICE_TOKEN },
-        body: JSON.stringify({ question, snapshot, workspace: { holdings: [], watchlist: [] } }),
-        signal: controller.signal,
-      });
-    } catch {
-      throw new MarketError('agent_unavailable', 503, '智能研究服务暂时不可用，请稍后再试。');
+      for (const serviceUrl of agentServiceUrls) {
+        try {
+          upstream = await fetch(new URL('/v1/research', serviceUrl).toString(), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-niannian-agent-token': process.env.NIANNIAN_AGENT_SERVICE_TOKEN },
+            body: JSON.stringify({ question, snapshot, workspace: { holdings: [], watchlist: [] } }),
+            signal: controller.signal,
+          });
+          break;
+        } catch {
+          // Railway private networking is region-bound; continue to the protected fallback URL.
+        }
+      }
     } finally { clearTimeout(timer); }
+    if (!upstream) {
+      throw new MarketError('agent_unavailable', 503, '智能研究服务暂时不可用，请稍后再试。');
+    }
     const result = await upstream.json().catch(() => ({}));
     if (!upstream.ok) throw new MarketError(result?.detail?.error || 'agent_unavailable', upstream.status >= 500 ? 503 : 502, result?.detail?.message || '智能研究服务暂时不可用，请稍后再试。');
     response.setHeader('Cache-Control', 'no-store');

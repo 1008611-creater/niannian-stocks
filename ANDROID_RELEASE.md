@@ -1,6 +1,8 @@
 # Android 发布
 
-当前 Capacitor 配置固定访问 `https://stocks.cauai.fun`，不会访问本机地址。`fun.cauai.niannianstocks` 是最终 Android 包名。
+当前 Capacitor 配置固定访问 `https://stocks.cauai.fun`，不会访问本机地址。`fun.cauai.niannianstocks` 是最终 Android 包名。当前发布版是 `1.1.0`，应用只允许正式股票站点、Clerk、Convex 与 Dodo 的必要导航域名。
+
+登录和支付完成后统一使用 `fun.cauai.niannianstocks://auth/callback` 或 `fun.cauai.niannianstocks://payment/complete` 回到 APK；在 Clerk 与 Dodo 控制台中登记这两个精确回调地址。Android 已声明通知权限，Firebase 接入后仍必须在首次需要提醒时由用户主动授权。
 
 开发验证：
 

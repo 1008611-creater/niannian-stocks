@@ -11,6 +11,8 @@ const config: CapacitorConfig = {
       'stocks.cauai.fun',
       '*.clerk.accounts.dev',
       '*.clerk.com',
+      '*.convex.cloud',
+      '*.convex.site',
       '*.dodopayments.com',
     ],
   },

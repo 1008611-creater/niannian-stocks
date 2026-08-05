@@ -246,15 +246,19 @@ export function createMarketService({ redis, isProduction }) {
         try {
           const fmpKey = process.env.FMP_API_KEY;
           const finnhubKey = process.env.FINNHUB_API_KEY;
-          const fmp = await getFmpCandles(symbol, fmpKey).catch((error) => error instanceof MarketError ? error : null);
-          const finnhub = fmp ? null : await getFinnhubCandles(symbol, finnhubKey).catch((error) => error instanceof MarketError ? error : null);
-          const candles = fmp || finnhub;
+          const fmpResult = await getFmpCandles(symbol, fmpKey).catch((error) => error instanceof MarketError ? error : null);
+          const finnhubResult = Array.isArray(fmpResult)
+            ? null
+            : await getFinnhubCandles(symbol, finnhubKey).catch((error) => error instanceof MarketError ? error : null);
+          const candles = Array.isArray(fmpResult) ? fmpResult : (Array.isArray(finnhubResult) ? finnhubResult : null);
           if (!candles) {
+            const providerError = [finnhubResult, fmpResult].find((result) => result instanceof MarketError);
+            if (providerError) throw providerError;
             if (isProduction) throw new MarketError('provider_unavailable', 502, '当前没有可用的商业行情数据源。');
             throw new MarketError('provider_unavailable');
           }
-          const source = fmp ? 'FMP' : 'Finnhub'; const updatedAt = new Date().toISOString(); const summary = buildSummary(candles); const backtest = buildBacktest(candles, symbol);
-          const eventsResult = await (fmp ? getFmpEvents(symbol, fmpKey) : getFinnhubEvents(symbol, finnhubKey)).catch(() => null);
+          const source = Array.isArray(fmpResult) ? 'FMP' : 'Finnhub'; const updatedAt = new Date().toISOString(); const summary = buildSummary(candles); const backtest = buildBacktest(candles, symbol);
+          const eventsResult = await (Array.isArray(fmpResult) ? getFmpEvents(symbol, fmpKey) : getFinnhubEvents(symbol, finnhubKey)).catch(() => null);
           const payload = { snapshotId: createHash('sha256').update(`${symbol}:${source}:${candles.at(-1).time}:${candles.at(-1).close}`).digest('hex').slice(0, 16), symbol, source, updatedAt, cache: 'miss', ...marketState(candles.at(-1).time), candles, summary, backtest, events: eventsResult || [], eventsStatus: eventsResult ? 'available' : 'unavailable', providerPolicy: { yahooFallbackEnabled: false, commercialDisplay: '当前候选不使用 Yahoo 回退；请在正式商业规模上线前确认数据供应商展示授权范围。' } };
           await cacheSet(key, payload);
           return payload;

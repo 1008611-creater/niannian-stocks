@@ -37,6 +37,7 @@ app.get('/api/health', (_request, response) => response.json({
   environment: isProduction ? 'production' : 'development',
   redis: upstashConfigured ? 'configured' : 'development_fallback',
   market: providerConfigured ? 'configured' : 'not_configured',
+  clerk: process.env.CLERK_JWT_ISSUER_DOMAIN ? 'configured' : 'not_configured',
   workspace: workspace.enabled ? 'configured' : 'not_configured',
   yahooFallback: false,
 }));

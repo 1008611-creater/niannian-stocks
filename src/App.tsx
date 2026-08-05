@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiError, loadResearch } from './api';
 import { EquityChart, PriceChart } from './chart';
-import { buildLegacyImport, legacyImportAvailable, readHoldings, readWatchlist, saveHoldings, saveWatchlist, validSymbol } from './storage';
+import { buildLegacyImport, legacyImportAvailable, localDefaultPortfolio, readHoldings, readPortfolios, readWatchlist, saveHoldings, saveWatchlist, validSymbol } from './storage';
 import type { Holding, Snapshot } from './types';
 
 const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
@@ -41,12 +41,15 @@ export default function App() {
   const [input, setInput] = useState(defaultSnapshot);
   const [watchlist, setWatchlist] = useState(readWatchlist);
   const [holdings, setHoldings] = useState<Holding[]>(readHoldings);
+  const [portfolios] = useState(readPortfolios);
+  const [activePortfolioId, setActivePortfolioId] = useState(() => readPortfolios()[0]?.id || localDefaultPortfolio.id);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [watchInput, setWatchInput] = useState('');
   const [positionSymbol, setPositionSymbol] = useState('');
   const [quantity, setQuantity] = useState('');
   const [cost, setCost] = useState('');
+  const [editingHoldingId, setEditingHoldingId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
   const [showImport, setShowImport] = useState(legacyImportAvailable);
   const [refreshing, setRefreshing] = useState(false);
@@ -79,23 +82,42 @@ export default function App() {
     return () => { window.removeEventListener('online', markOnline); window.removeEventListener('offline', markOffline); };
   }, []);
 
+  const activePortfolio = portfolios.find((item) => item.id === activePortfolioId) || portfolios[0] || localDefaultPortfolio;
+  const portfolioHoldings = useMemo(() => holdings.filter((item) => item.portfolioId === activePortfolio.id), [holdings, activePortfolio.id]);
   const holdingSummary = useMemo(() => {
-    if (!snapshot || !holdings.length) return null;
-    const active = holdings.filter((item) => item.symbol === snapshot.symbol);
+    if (!snapshot || !portfolioHoldings.length) return null;
+    const active = portfolioHoldings.filter((item) => item.symbol === snapshot.symbol);
     const invested = active.reduce((total, item) => total + item.quantity * item.cost, 0);
     const value = active.reduce((total, item) => total + item.quantity * snapshot.summary.price, 0);
     return { invested, value, pnl: value - invested, activeCount: active.length };
-  }, [holdings, snapshot]);
+  }, [portfolioHoldings, snapshot]);
+  const portfolioCostBasis = useMemo(() => portfolioHoldings.reduce((total, item) => total + item.quantity * item.cost, 0), [portfolioHoldings]);
   const evidence = useMemo(() => snapshot ? signalLabel(snapshot) : [], [snapshot]);
 
   function chooseSymbol(next: string) { const value = next.trim().toUpperCase(); if (!validSymbol(value)) { setMessage('请输入有效的美股代码。'); return; } setInput(value); setSymbol(value); setMessage(''); }
   function addWatch(event: Event) { event.preventDefault(); const next = watchInput.trim().toUpperCase(); if (!validSymbol(next)) { setMessage('自选代码格式不正确。'); return; } if (watchlist.includes(next)) { setMessage(`${next} 已在自选中。`); return; } if (watchlist.length >= 5) { setMessage('免费层最多 5 只自选。登录并升级 Pro 后可扩展至 50 只。'); return; } setWatchlist([...watchlist, next]); setWatchInput(''); setMessage(`${next} 已加入自选。`); }
   function addPosition(event: Event) {
-    event.preventDefault(); const next = positionSymbol.trim().toUpperCase(); const parsedQuantity = Number(quantity); const parsedCost = Number(cost);
-    if (!validSymbol(next) || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0 || !Number.isFinite(parsedCost) || parsedCost <= 0) { setMessage('请填写有效代码、数量和平均成本。'); return; }
-    const existing = holdings.find((item) => item.symbol === next); const updated = existing ? holdings.map((item) => item.symbol === next ? { ...item, quantity: item.quantity + parsedQuantity, cost: (item.quantity * item.cost + parsedQuantity * parsedCost) / (item.quantity + parsedQuantity) } : item) : [...holdings, { id: crypto.randomUUID(), symbol: next, quantity: parsedQuantity, cost: parsedCost }];
-    setHoldings(updated); setPositionSymbol(''); setQuantity(''); setCost(''); setMessage(`${next} 已写入本机组合草稿；登录后将可云同步。`);
+    event.preventDefault(); savePosition();
   }
+  function savePosition() {
+    const next = positionSymbol.trim().toUpperCase(); const parsedQuantity = Number(quantity); const parsedCost = Number(cost);
+    if (!validSymbol(next) || !Number.isFinite(parsedQuantity) || parsedQuantity <= 0 || !Number.isFinite(parsedCost) || parsedCost <= 0) { setMessage('请填写有效代码、数量和平均成本。'); return; }
+    if (editingHoldingId) {
+      const current = holdings.find((item) => item.id === editingHoldingId);
+      if (!current) { setEditingHoldingId(null); setMessage('要编辑的持仓不存在，请重新录入。'); return; }
+      const matching = holdings.find((item) => item.id !== current.id && item.portfolioId === activePortfolio.id && item.symbol === next);
+      const updated = matching ? holdings.filter((item) => item.id !== current.id).map((item) => item.id === matching.id ? { ...item, quantity: item.quantity + parsedQuantity, cost: (item.quantity * item.cost + parsedQuantity * parsedCost) / (item.quantity + parsedQuantity) } : item) : holdings.map((item) => item.id === current.id ? { ...item, symbol: next, quantity: parsedQuantity, cost: parsedCost } : item);
+      setHoldings(updated); setMessage(`${next} 持仓已更新。`);
+    } else {
+      const existing = holdings.find((item) => item.portfolioId === activePortfolio.id && item.symbol === next);
+      const updated = existing ? holdings.map((item) => item.id === existing.id ? { ...item, quantity: item.quantity + parsedQuantity, cost: (item.quantity * item.cost + parsedQuantity * parsedCost) / (item.quantity + parsedQuantity) } : item) : [...holdings, { id: crypto.randomUUID(), portfolioId: activePortfolio.id, symbol: next, quantity: parsedQuantity, cost: parsedCost }];
+      setHoldings(updated); setMessage(`${next} 已写入${activePortfolio.name}；登录后将可云同步。`);
+    }
+    setPositionSymbol(''); setQuantity(''); setCost(''); setEditingHoldingId(null);
+  }
+  function editHolding(item: Holding) { setEditingHoldingId(item.id); setPositionSymbol(item.symbol); setQuantity(String(item.quantity)); setCost(String(item.cost)); setMessage(`正在编辑 ${item.symbol}。`); }
+  function cancelEdit() { setEditingHoldingId(null); setPositionSymbol(''); setQuantity(''); setCost(''); setMessage('已取消编辑。'); }
+  function requestNewPortfolio() { setMessage('免费层最多 1 个组合。完成登录并获得 Pro 权益后，可在这里创建最多 5 个组合。'); }
   function importLegacy() { const payload = buildLegacyImport(); sessionStorage.setItem('niannian-stocks-pending-import', JSON.stringify(payload)); setShowImport(false); setMessage('旧试玩页数据已安全整理为待导入包；登录功能接入后会写入当前账户。'); }
 
   return <main>
@@ -111,7 +133,7 @@ export default function App() {
       <div class="decision-grid">
         <div><span>当前研究标的</span><strong>{snapshot?.symbol || symbol}</strong><small>{snapshot ? `${snapshot.source} · ${displayDate(snapshot.updatedAt)}` : '载入中'}</small></div>
         <div><span>趋势</span><strong class={snapshot?.summary.trend === 'bullish' ? 'positive' : 'negative'}>{snapshot?.summary.trend === 'bullish' ? 'MA20 高于 MA50' : snapshot ? 'MA20 低于 MA50' : '—'}</strong><small>研究信号，不是交易指令</small></div>
-        <div><span>组合中的当前标的</span><strong>{holdingSummary ? currency.format(holdingSummary.value) : '未录入'}</strong><small>{holdingSummary ? `${holdingSummary.activeCount} 笔成本合并显示` : '可在下方录入持仓'}</small></div>
+        <div><span>{activePortfolio.name}</span><strong>{holdingSummary ? currency.format(holdingSummary.value) : portfolioHoldings.length ? currency.format(portfolioCostBasis) : '未录入'}</strong><small>{holdingSummary ? `${holdingSummary.activeCount} 笔当前标的持仓` : portfolioHoldings.length ? `${portfolioHoldings.length} 个标的 · 成本口径` : '可在下方录入持仓'}</small></div>
         <div><span>下一步</span><strong>{snapshot?.eventsStatus === 'not_configured' ? '事件层待接入' : '查看事件'}</strong><small>财报与后台提醒属于 Pro 能力</small></div>
       </div>
     </section>
@@ -140,7 +162,7 @@ export default function App() {
       </aside>
     </section>
 
-    <section class="surface portfolio" aria-labelledby="portfolio-title"><div class="section-head"><div><h2 id="portfolio-title">组合草稿</h2><p>当前保存在本机；登录后会一次性迁移至你的云端账户。</p></div><span>{holdings.length ? `${holdings.length} 个标的` : '空组合'}</span></div><form class="position-form" onSubmit={addPosition}><input aria-label="持仓代码" placeholder="代码，例如 NVDA" value={positionSymbol} maxlength={10} onInput={(event) => setPositionSymbol((event.target as HTMLInputElement).value.toUpperCase())} /><input aria-label="持仓数量" placeholder="数量" inputMode="decimal" type="number" min="0.0001" step="0.0001" value={quantity} onInput={(event) => setQuantity((event.target as HTMLInputElement).value)} /><input aria-label="平均成本（美元）" placeholder="平均成本 USD" inputMode="decimal" type="number" min="0.0001" step="0.01" value={cost} onInput={(event) => setCost((event.target as HTMLInputElement).value)} /><button type="submit">保存持仓</button></form>{holdings.length ? <div class="holding-list">{holdings.map((item) => <div key={item.id}><button type="button" onClick={() => chooseSymbol(item.symbol)}>{item.symbol}</button><span>{item.quantity} 股 · 成本 {currency.format(item.cost)}</span><button type="button" class="remove" aria-label={`删除 ${item.symbol} 持仓`} onClick={() => setHoldings(holdings.filter((holding) => holding.id !== item.id))}>删除</button></div>)}</div> : <p class="muted">录入第一笔持仓后，会基于当前研究快照显示对应标的估值。</p>}</section>
+    <section class="surface portfolio" aria-labelledby="portfolio-title"><div class="section-head"><div><h2 id="portfolio-title">组合草稿</h2><p>当前仅保存在本机；登录后会一次性迁移至你的云端账户。</p></div><span>{portfolioHoldings.length ? `${portfolioHoldings.length} 个标的` : '空组合'}</span></div><div class="portfolio-switcher"><label>当前组合<select value={activePortfolio.id} onChange={(event) => setActivePortfolioId((event.target as HTMLSelectElement).value)}>{portfolios.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button type="button" class="secondary" onClick={requestNewPortfolio}>新建组合</button></div><p class="portfolio-note">免费层 1 个组合；Pro 最多 5 个。当前组合成本合计：{currency.format(portfolioCostBasis)}。</p><form class="position-form" onSubmit={addPosition}><input aria-label="持仓代码" placeholder="代码，例如 NVDA" value={positionSymbol} maxlength={10} onInput={(event) => setPositionSymbol((event.target as HTMLInputElement).value.toUpperCase())} /><input aria-label="持仓数量" placeholder="数量" inputMode="decimal" type="number" min="0.0001" step="0.0001" value={quantity} onInput={(event) => setQuantity((event.target as HTMLInputElement).value)} /><input aria-label="平均成本（美元）" placeholder="平均成本 USD" inputMode="decimal" type="number" min="0.0001" step="0.01" value={cost} onInput={(event) => setCost((event.target as HTMLInputElement).value)} /><button type="button" onClick={savePosition}>{editingHoldingId ? '保存修改' : '保存持仓'}</button>{editingHoldingId && <button type="button" class="secondary cancel-edit" onClick={cancelEdit}>取消</button>}</form>{portfolioHoldings.length ? <div class="holding-list">{portfolioHoldings.map((item) => <div key={item.id}><button type="button" onClick={() => chooseSymbol(item.symbol)}>{item.symbol}</button><span>{item.quantity} 股 · 成本 {currency.format(item.cost)}</span><button type="button" class="quiet" aria-label={`编辑 ${item.symbol} 持仓`} onClick={() => editHolding(item)}>编辑</button><button type="button" class="remove" aria-label={`删除 ${item.symbol} 持仓`} onClick={() => setHoldings(holdings.filter((holding) => holding.id !== item.id))}>删除</button></div>)}</div> : <p class="muted">录入第一笔持仓后，会基于当前研究快照显示对应标的估值。</p>}</section>
     <footer>念念智股只提供可追溯研究信息，不提供个性化投资建议或券商交易服务。</footer>
   </main>;
 }

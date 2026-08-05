@@ -1,6 +1,7 @@
 export type Candle = { time: string; open: number; high: number; low: number; close: number; volume: number };
 export type Summary = { price: number; change: number; changePct: number; trend: 'bullish' | 'bearish'; rsi14: number | null; volumeRatio: number | null; ma20: number; ma50: number; support20: number; resistance20: number };
-export type Holding = { id: string; symbol: string; quantity: number; cost: number };
+export type Portfolio = { id: string; name: string; isDefault: boolean };
+export type Holding = { id: string; portfolioId: string; symbol: string; quantity: number; cost: number };
 export type MarketEvent = { kind: 'earnings' | 'dividend' | 'split'; date: string; title: string; timing: string; detail: string };
 export type Snapshot = {
   snapshotId: string; symbol: string; source: string; updatedAt: string; marketStatus: string; delayLabel: string; candles: Candle[]; summary: Summary;

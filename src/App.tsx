@@ -36,6 +36,12 @@ function eventStatusLabel(snapshot: Snapshot) {
   return snapshot.eventsStatus === 'unavailable' ? '数据源暂不可用' : '事件源待配置';
 }
 
+type DeepLinkListener = { remove?: () => void | Promise<void> };
+type DeepLinkPlugin = { addListener?: (event: 'appUrlOpen', listener: (payload: { url?: string }) => void) => DeepLinkListener | Promise<DeepLinkListener> };
+function getDeepLinkPlugin() {
+  return (window as Window & { Capacitor?: { Plugins?: { DeepLink?: DeepLinkPlugin } } }).Capacitor?.Plugins?.DeepLink;
+}
+
 export default function App() {
   const [symbol, setSymbol] = useState(defaultSnapshot);
   const [input, setInput] = useState(defaultSnapshot);
@@ -80,6 +86,21 @@ export default function App() {
     window.addEventListener('online', markOnline);
     window.addEventListener('offline', markOffline);
     return () => { window.removeEventListener('online', markOnline); window.removeEventListener('offline', markOffline); };
+  }, []);
+  useEffect(() => {
+    const plugin = getDeepLinkPlugin();
+    let disposed = false;
+    let listener: DeepLinkListener | undefined;
+    const handleUrl = ({ url }: { url?: string }) => {
+      if (!url) return;
+      if (url.startsWith('fun.cauai.niannianstocks://auth/')) setMessage('已回到念念智股，请继续完成登录。');
+      if (url.startsWith('fun.cauai.niannianstocks://payment/')) setMessage('已回到念念智股，套餐状态会在支付回调确认后同步。');
+    };
+    Promise.resolve(plugin?.addListener?.('appUrlOpen', handleUrl)).then((next) => {
+      if (disposed) { void next?.remove?.(); return; }
+      listener = next;
+    }).catch(() => undefined);
+    return () => { disposed = true; void listener?.remove?.(); };
   }, []);
 
   const activePortfolio = portfolios.find((item) => item.id === activePortfolioId) || portfolios[0] || localDefaultPortfolio;

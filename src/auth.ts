@@ -64,7 +64,7 @@ async function createClient(config: Required<Pick<AuthConfig, 'url' | 'anonKey'>
     user: null,
     addListener(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     async signUp(email, password) {
-      const result = await request('/auth/v1/signup', { email, password, data: {} });
+      const result = await request('/auth/v1/signup', { email, password, data: {}, email_redirect_to: window.location.origin });
       const session = normalizeSession(result);
       if (session) await setSession(session);
       return { emailConfirmationRequired: !session };

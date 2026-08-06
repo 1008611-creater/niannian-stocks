@@ -322,7 +322,7 @@ export default function App() {
         const result = await auth.signUp(normalizedEmail, password);
         if (result.emailConfirmationRequired) {
           setPassword(''); setVerificationCode(''); setResendCooldown(60); setAwaitingEmailCode(true);
-          setMessage('验证码已发送，请在 QQ 邮箱中查看后输入。');
+          setMessage('验证邮件已发送，请点击邮件中的验证链接；如果邮件显示 6 位验证码，也可以在这里输入。');
           return;
         }
         setMessage('账户已创建，正在同步云端资料。');
@@ -357,7 +357,7 @@ export default function App() {
     try {
       await auth.resendEmailCode(normalizedEmail);
       setResendCooldown(60);
-      setMessage('验证码已重新发送，请检查 QQ 邮箱的收件箱和垃圾邮件。');
+      setMessage('验证邮件已重新发送，请检查邮箱收件箱和垃圾邮件。');
     } catch (reason) { setMessage((reason as Error).message || '验证码暂时无法重新发送，请稍后再试。'); }
     finally { setAuthSubmitting(false); }
   }
@@ -422,9 +422,10 @@ export default function App() {
     {showAuth && <section class="auth-panel" aria-label="邮箱登录与注册">
       <div class="auth-heading"><strong>{awaitingEmailCode ? '输入验证码' : authMode === 'sign_in' ? '登录并同步' : '注册 QQ 邮箱'}</strong><button type="button" class="quiet" onClick={() => { setShowAuth(false); setPassword(''); setVerificationCode(''); setAwaitingEmailCode(false); }}>收起</button></div>
       {awaitingEmailCode ? <form class="auth-form verification-form" onSubmit={submitEmailCode}>
+        <p class="verification-hint">优先点击邮件中的验证链接；收到 6 位验证码时再填写下方输入框。</p>
         <label>验证码<input type="text" value={verificationCode} inputMode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" maxlength={6} onInput={(event) => setVerificationCode((event.target as HTMLInputElement).value.replace(/\D/g, ''))} disabled={authSubmitting} required /></label>
         <button type="submit" disabled={authSubmitting}>{authSubmitting ? '正在验证…' : '验证并同步'}</button>
-        <button type="button" class="secondary" onClick={resendEmailCode} disabled={authSubmitting || resendCooldown > 0}>{resendCooldown > 0 ? `${resendCooldown} 秒后重发` : '重新发送验证码'}</button>
+        <button type="button" class="secondary" onClick={resendEmailCode} disabled={authSubmitting || resendCooldown > 0}>{resendCooldown > 0 ? `${resendCooldown} 秒后重发` : '重新发送验证邮件'}</button>
         <button type="button" class="secondary" onClick={() => { setAwaitingEmailCode(false); setVerificationCode(''); setResendCooldown(0); setMessage(''); }} disabled={authSubmitting}>返回注册</button>
       </form> : <><div class="auth-tabs" role="tablist" aria-label="账户操作">
         <button type="button" role="tab" aria-selected={authMode === 'sign_in'} class={authMode === 'sign_in' ? 'active' : ''} onClick={() => { setAuthMode('sign_in'); setMessage(''); }}>邮箱登录</button>

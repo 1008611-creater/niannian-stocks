@@ -31,6 +31,7 @@ export type SupabaseAuthClient = {
   user: AuthUser | null;
   addListener: (listener: () => void) => () => void;
   signUp: (email: string, password: string) => Promise<{ emailConfirmationRequired: boolean }>;
+  resendEmailCode: (email: string) => Promise<void>;
   verifyEmailCode: (email: string, code: string) => Promise<void>;
   signInWithPassword: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -67,6 +68,9 @@ async function createClient(config: Required<Pick<AuthConfig, 'url' | 'anonKey'>
       const session = normalizeSession(result);
       if (session) await setSession(session);
       return { emailConfirmationRequired: !session };
+    },
+    async resendEmailCode(email) {
+      await request('/auth/v1/resend', { type: 'signup', email });
     },
     async verifyEmailCode(email, code) {
       const result = await request('/auth/v1/verify', { email, token: code, type: 'signup' });

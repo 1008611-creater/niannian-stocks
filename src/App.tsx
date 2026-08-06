@@ -18,6 +18,43 @@ const researchPrompts = [
 
 function signed(value: number) { return percentage.format(value / 100); }
 function tone(value: number) { return value >= 0 ? 'positive' : 'negative'; }
+type PortfolioRow = {
+  holding: Holding;
+  snapshot: Snapshot | null;
+  marketValue: number | null;
+  costBasis: number;
+  pnl: number | null;
+  pnlPct: number | null;
+  weightPct: number | null;
+  risk: '趋势偏弱' | '动量极端' | '观察';
+};
+
+function portfolioRowsFor(holdings: Holding[], snapshots: Record<string, Snapshot>): PortfolioRow[] {
+  const rows = holdings.map((holding) => {
+    const current = snapshots[holding.symbol] || null;
+    const costBasis = holding.quantity * holding.cost;
+    const marketValue = current ? holding.quantity * current.summary.price : null;
+    const pnl = marketValue === null ? null : marketValue - costBasis;
+    const pnlPct = pnl === null || costBasis <= 0 ? null : (pnl / costBasis) * 100;
+    const risk: PortfolioRow['risk'] = current?.summary.trend === 'bearish' ? '趋势偏弱' : current?.summary.rsi14 !== null && current?.summary.rsi14 !== undefined && (current.summary.rsi14 >= 70 || current.summary.rsi14 <= 30) ? '动量极端' : '观察';
+    return { holding, snapshot: current, marketValue, costBasis, pnl, pnlPct, weightPct: null, risk };
+  });
+  const totalValue = rows.reduce((sum, row) => sum + (row.marketValue || 0), 0);
+  return rows.map((row) => ({ ...row, weightPct: row.marketValue === null || totalValue <= 0 ? null : (row.marketValue / totalValue) * 100 }));
+}
+
+function portfolioTotals(rows: PortfolioRow[]) {
+  const totalCost = rows.reduce((sum, row) => sum + row.costBasis, 0);
+  const knownRows = rows.filter((row) => row.marketValue !== null);
+  const complete = knownRows.length === rows.length;
+  const totalValue = complete ? knownRows.reduce((sum, row) => sum + (row.marketValue || 0), 0) : null;
+  const totalPnl = totalValue === null ? null : totalValue - totalCost;
+  const totalPnlPct = totalPnl === null || totalCost <= 0 ? null : (totalPnl / totalCost) * 100;
+  const maxWeight = complete ? Math.max(0, ...rows.map((row) => row.weightPct || 0)) : 0;
+  const riskCount = rows.filter((row) => row.risk !== '观察').length;
+  return { totalCost, totalValue, totalPnl, totalPnlPct, maxWeight, riskCount, missingCount: rows.length - knownRows.length };
+}
+
 function ResearchState({ error, retry }: { error: ApiError | null; retry: () => void }) {
   if (!error) return <div class="loading" role="status">正在组合当前标的的同一份研究快照…</div>;
   return <div class="error-state" role="alert"><strong>行情没有载入</strong><span>{error.message}</span>{error.retryable && <button class="secondary" onClick={retry}>重新尝试</button>}</div>;
@@ -80,6 +117,8 @@ export default function App() {
   const [portfolios, setPortfolios] = useState<Portfolio[]>(readPortfolios);
   const [activePortfolioId, setActivePortfolioId] = useState(() => readPortfolios()[0]?.id || localDefaultPortfolio.id);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [portfolioSnapshots, setPortfolioSnapshots] = useState<Record<string, Snapshot>>({});
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
   const [watchInput, setWatchInput] = useState('');
   const [positionSymbol, setPositionSymbol] = useState('');
@@ -208,8 +247,29 @@ export default function App() {
   }, []);
 
   const portfolioHoldings = useMemo(() => holdings.filter((item) => item.portfolioId === activePortfolio.id), [holdings, activePortfolio.id]);
+  const portfolioSymbolsKey = useMemo(() => [...new Set(portfolioHoldings.map((item) => item.symbol))].sort().join(','), [portfolioHoldings]);
+  const resolvedPortfolioSnapshots = useMemo(() => snapshot ? { ...portfolioSnapshots, [snapshot.symbol]: snapshot } : portfolioSnapshots, [portfolioSnapshots, snapshot]);
+  const portfolioRows = useMemo(() => portfolioRowsFor(portfolioHoldings, resolvedPortfolioSnapshots), [portfolioHoldings, resolvedPortfolioSnapshots]);
+  const portfolioTotal = useMemo(() => portfolioTotals(portfolioRows), [portfolioRows]);
   const evidence = useMemo(() => snapshot ? signalLabel(snapshot) : [], [snapshot]);
   const verdict = useMemo(() => snapshot ? researchVerdict(snapshot) : null, [snapshot]);
+
+  useEffect(() => {
+    const symbols = portfolioSymbolsKey ? portfolioSymbolsKey.split(',') : [];
+    if (!symbols.length) { setPortfolioLoading(false); return; }
+    let active = true;
+    setPortfolioLoading(true);
+    Promise.all(symbols.map(async (item) => {
+      if (item === snapshot?.symbol && snapshot) return [item, snapshot] as const;
+      try { return [item, await loadResearch(item)] as const; } catch { return null; }
+    })).then((entries) => {
+      if (!active) return;
+      const next = Object.fromEntries(entries.filter((entry): entry is readonly [string, Snapshot] => Boolean(entry)));
+      setPortfolioSnapshots((current) => ({ ...current, ...next }));
+      setPortfolioLoading(false);
+    });
+    return () => { active = false; };
+  }, [portfolioSymbolsKey, snapshot]);
 
   function chooseSymbol(next: string) { const value = next.trim().toUpperCase(); if (!validSymbol(value)) { setMessage('请输入有效的美股代码。'); return; } setInput(value); setSymbol(value); setMessage(''); }
   async function addWatch(event: Event) { event.preventDefault(); const next = watchInput.trim().toUpperCase(); if (!validSymbol(next)) { setMessage('自选代码格式不正确。'); return; } if (watchlist.includes(next)) { setMessage(`${next} 已在自选中。`); return; } if (!accountUser && watchlist.length >= 5) { setMessage('免费层最多 5 只自选。登录并升级 Pro 后可扩展至 50 只。'); return; } try { if (accountUser) applyWorkspace(await accountRequest('/api/account/watchlist', { method: 'POST', body: JSON.stringify({ symbol: next }) })); else setWatchlist([...watchlist, next]); setWatchInput(''); setMessage(`${next} 已加入${accountUser ? '云端' : '本机'}自选。`); } catch (reason) { setMessage((reason as Error).message); } }
@@ -251,6 +311,31 @@ export default function App() {
       if (!response.ok) throw accountError(response, payload);
       setAgentReport(payload as AgentReport);
     } catch (reason) { setMessage((reason as Error).message || '智能研究暂时不可用，请稍后再试。'); }
+    finally { setAgentLoading(false); }
+  }
+
+  async function runPortfolioResearch() {
+    const available = portfolioRows.filter((row) => row.snapshot);
+    if (!available.length) { setMessage('组合还没有可用行情，先保存持仓并等待数据载入。'); return; }
+    const question = '请综合当前组合的集中度、持仓趋势和动量风险，告诉我今天最值得先核查的两三件事，并说明哪些数据仍不足。不要输出买卖或调仓指令。';
+    setAgentQuestion(question); setAgentLoading(true); setMessage('');
+    try {
+      const response = await fetch('/api/agent/research', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({
+        symbol: available[0].holding.symbol,
+        question,
+        portfolio: {
+          totalValue: portfolioTotal.totalValue,
+          totalPnlPct: portfolioTotal.totalPnlPct,
+          maxWeightPct: portfolioTotal.maxWeight,
+          riskCount: portfolioTotal.riskCount,
+          missingCount: portfolioTotal.missingCount,
+          positions: available.map((row) => ({ symbol: row.holding.symbol, weightPct: row.weightPct, pnlPct: row.pnlPct, trend: row.snapshot?.summary.trend, rsi14: row.snapshot?.summary.rsi14, risk: row.risk })),
+        },
+      }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw accountError(response, payload);
+      setAgentReport(payload as AgentReport);
+    } catch (reason) { setMessage((reason as Error).message || '组合研究暂时不可用，请稍后再试。'); }
     finally { setAgentLoading(false); }
   }
 
@@ -307,6 +392,6 @@ export default function App() {
       </aside>
     </section>
 
-    <section class="surface portfolio" aria-labelledby="portfolio-title"><div class="section-head"><h2 id="portfolio-title">{accountUser ? '云端组合' : '组合草稿'}</h2><span>{portfolioHoldings.length ? `${portfolioHoldings.length} 个标的` : '空组合'}</span></div><div class="portfolio-switcher"><label>当前组合<select value={activePortfolio.id} onChange={(event) => setActivePortfolioId((event.target as HTMLSelectElement).value)}>{portfolios.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button type="button" class="secondary" onClick={requestNewPortfolio}>新建组合</button></div><form class="position-form" onSubmit={addPosition}><input aria-label="持仓代码" placeholder="代码，例如 NVDA" value={positionSymbol} maxlength={10} onInput={(event) => setPositionSymbol((event.target as HTMLInputElement).value.toUpperCase())} /><input aria-label="持仓数量" placeholder="数量" inputMode="decimal" type="number" min="0.0001" step="0.0001" value={quantity} onInput={(event) => setQuantity((event.target as HTMLInputElement).value)} /><input aria-label="平均成本（美元）" placeholder="平均成本 USD" inputMode="decimal" type="number" min="0.0001" step="0.01" value={cost} onInput={(event) => setCost((event.target as HTMLInputElement).value)} /><button type="submit">{editingHoldingId ? '保存修改' : '保存持仓'}</button>{editingHoldingId && <button type="button" class="secondary cancel-edit" onClick={cancelEdit}>取消</button>}</form>{portfolioHoldings.length ? <div class="holding-list">{portfolioHoldings.map((item) => <div key={item.id}><button type="button" onClick={() => chooseSymbol(item.symbol)}>{item.symbol}</button><span>{item.quantity} 股 · 成本 {currency.format(item.cost)}</span><button type="button" class="quiet" aria-label={`编辑 ${item.symbol} 持仓`} onClick={() => editHolding(item)}>编辑</button><button type="button" class="remove" aria-label={`删除 ${item.symbol} 持仓`} onClick={() => void removePosition(item.id)}>删除</button></div>)}</div> : <p class="muted">暂无持仓</p>}</section>
+    <section class="surface portfolio" aria-labelledby="portfolio-title"><div class="section-head"><h2 id="portfolio-title">{accountUser ? '云端组合' : '组合草稿'}</h2><span>{portfolioHoldings.length ? `${portfolioHoldings.length} 个标的` : '空组合'}</span></div><div class="portfolio-switcher"><label>当前组合<select value={activePortfolio.id} onChange={(event) => setActivePortfolioId((event.target as HTMLSelectElement).value)}>{portfolios.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button type="button" class="secondary" onClick={requestNewPortfolio}>新建组合</button></div>{portfolioHoldings.length > 0 && <><div class="portfolio-metrics"><div><span>组合市值</span><strong>{portfolioTotal.totalValue ? currency.format(portfolioTotal.totalValue) : '等待行情'}</strong></div><div><span>浮盈亏</span><strong class={portfolioTotal.totalPnl === null ? '' : tone(portfolioTotal.totalPnl)}>{portfolioTotal.totalPnl === null ? '等待行情' : `${currency.format(portfolioTotal.totalPnl)} · ${signed(portfolioTotal.totalPnlPct || 0)}`}</strong></div><div><span>最大仓位</span><strong>{portfolioTotal.maxWeight ? `${portfolioTotal.maxWeight.toFixed(1)}%` : '等待行情'}</strong></div><div><span>风险观察</span><strong class={portfolioTotal.riskCount ? 'negative' : 'positive'}>{portfolioTotal.riskCount ? `${portfolioTotal.riskCount} 个需先看` : '暂无明显风险'}</strong></div></div><div class="portfolio-actions"><span>{portfolioLoading ? '正在同步组合内行情…' : portfolioTotal.missingCount ? `${portfolioTotal.missingCount} 个标的暂时没有可用行情` : '组合数据来自各标的最新研究快照'}</span><button type="button" class="secondary" onClick={() => void runPortfolioResearch()} disabled={agentLoading || portfolioLoading}>{agentLoading ? '研究中…' : '组合风险研究'}</button></div></>}<form class="position-form" onSubmit={addPosition}><input aria-label="持仓代码" placeholder="代码，例如 NVDA" value={positionSymbol} maxlength={10} onInput={(event) => setPositionSymbol((event.target as HTMLInputElement).value.toUpperCase())} /><input aria-label="持仓数量" placeholder="数量" inputMode="decimal" type="number" min="0.0001" step="0.0001" value={quantity} onInput={(event) => setQuantity((event.target as HTMLInputElement).value)} /><input aria-label="平均成本（美元）" placeholder="平均成本 USD" inputMode="decimal" type="number" min="0.0001" step="0.01" value={cost} onInput={(event) => setCost((event.target as HTMLInputElement).value)} /><button type="submit">{editingHoldingId ? '保存修改' : '保存持仓'}</button>{editingHoldingId && <button type="button" class="secondary cancel-edit" onClick={cancelEdit}>取消</button>}</form>{portfolioHoldings.length ? <div class="holding-list">{portfolioRows.map((row) => <div key={row.holding.id} class="holding-row"><button type="button" onClick={() => chooseSymbol(row.holding.symbol)}>{row.holding.symbol}</button><span>{row.marketValue === null ? '行情待更新' : `${currency.format(row.marketValue)} · ${row.weightPct?.toFixed(1)}%仓位`}<small>{row.pnlPct === null ? `成本 ${currency.format(row.holding.cost)}` : `${row.pnlPct >= 0 ? '+' : ''}${row.pnlPct.toFixed(2)}% · ${row.risk}`}</small></span><button type="button" class="quiet" aria-label={`编辑 ${row.holding.symbol} 持仓`} onClick={() => editHolding(row.holding)}>编辑</button><button type="button" class="remove" aria-label={`删除 ${row.holding.symbol} 持仓`} onClick={() => void removePosition(row.holding.id)}>删除</button></div>)}</div> : <p class="muted">暂无持仓</p>}</section>
   </main>;
 }

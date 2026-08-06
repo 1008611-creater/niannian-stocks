@@ -80,6 +80,22 @@ app.post('/api/agent/research', async (request, response, next) => {
     }
     const symbol = normalizeSymbol(request.body?.symbol);
     const question = typeof request.body?.question === 'string' ? request.body.question.trim().slice(0, 700) : '';
+    const rawPortfolio = request.body?.portfolio && typeof request.body.portfolio === 'object' ? request.body.portfolio : null;
+    const portfolio = rawPortfolio ? {
+      totalValue: Number.isFinite(Number(rawPortfolio.totalValue)) ? Number(rawPortfolio.totalValue) : null,
+      totalPnlPct: Number.isFinite(Number(rawPortfolio.totalPnlPct)) ? Number(rawPortfolio.totalPnlPct) : null,
+      maxWeightPct: Number.isFinite(Number(rawPortfolio.maxWeightPct)) ? Number(rawPortfolio.maxWeightPct) : null,
+      riskCount: Math.max(0, Math.min(50, Number(rawPortfolio.riskCount) || 0)),
+      missingCount: Math.max(0, Math.min(50, Number(rawPortfolio.missingCount) || 0)),
+      positions: Array.isArray(rawPortfolio.positions) ? rawPortfolio.positions.slice(0, 50).map((item) => ({
+        symbol: normalizeSymbol(item?.symbol),
+        weightPct: Number.isFinite(Number(item?.weightPct)) ? Number(item.weightPct) : null,
+        pnlPct: Number.isFinite(Number(item?.pnlPct)) ? Number(item.pnlPct) : null,
+        trend: item?.trend === 'bullish' || item?.trend === 'bearish' ? item.trend : null,
+        rsi14: Number.isFinite(Number(item?.rsi14)) ? Number(item.rsi14) : null,
+        risk: typeof item?.risk === 'string' ? item.risk.slice(0, 24) : '观察',
+      })) : [],
+    } : null;
     const snapshot = await market.research(symbol);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 50_000);
@@ -90,7 +106,7 @@ app.post('/api/agent/research', async (request, response, next) => {
           upstream = await fetch(new URL('/v1/research', serviceUrl).toString(), {
             method: 'POST',
             headers: { 'content-type': 'application/json', 'x-niannian-agent-token': process.env.NIANNIAN_AGENT_SERVICE_TOKEN },
-            body: JSON.stringify({ question, snapshot, workspace: { holdings: [], watchlist: [] } }),
+            body: JSON.stringify({ question, snapshot, workspace: { holdings: [], watchlist: [], portfolio } }),
             signal: controller.signal,
           });
           break;

@@ -43,6 +43,7 @@ main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: max(24px,
 .event-list { display: grid; gap: 0; margin: 0 0 14px; padding: 0; list-style: none; }.event-list li { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid #1b2e42; }.event-list li:first-child { border-top: 0; }.event-list strong, .event-list span { display: block; }.event-list span { margin-top: 4px; color: #9eb2c9; font-size: 13px; }.event-list time { flex: 0 0 auto; color: #c6d7e8; font-size: 12px; text-align: right; }
 .alert-count { flex: 0 0 auto; min-height: 26px; padding: 5px 8px; border: 1px solid #2c7657; border-radius: 999px; color: #8ce8bd !important; background: #113a2b; font-size: 12px !important; font-weight: 760; }
 .alert-center { display: grid; gap: 16px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #1b2e42; }
+.alert-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #dceafa; font-size: 14px; }
 .alert-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .65fr) auto; align-items: end; gap: 8px; }
 .alert-form label { display: grid; min-width: 0; gap: 6px; color: #9fb2c7; font-size: 13px; }
 .alert-form button { min-width: 112px; }

@@ -30,6 +30,7 @@ const workspace = createWorkspaceStore({ url: process.env.SUPABASE_URL, serviceR
 const supabaseAuthOrigin = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const alertScanEnabled = isProduction && workspace.enabled && providerConfigured;
 const alertScanIntervalMs = Math.max(5 * 60_000, Number(process.env.NIANNIAN_ALERT_SCAN_INTERVAL_MS || 15 * 60_000));
+const alertScanLockKey = 'niannian:alerts:scan:lock';
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -211,9 +212,19 @@ let alertScanRunning = false;
 async function runAlertScan() {
   if (!alertScanEnabled || alertScanRunning) return;
   alertScanRunning = true;
-  try { console.log('alert-scan', await workspace.scanAlertRules((symbol) => market.research(symbol))); }
+  let lockAcquired = true;
+  try {
+    if (redis) {
+      lockAcquired = Boolean(await redis.set(alertScanLockKey, `${process.pid}:${Date.now()}`, { nx: true, ex: 180 }));
+      if (!lockAcquired) return;
+    }
+    console.log('alert-scan', await workspace.scanAlertRules((symbol) => market.research(symbol)));
+  }
   catch (error) { console.error('alert-scan-error', error?.message || 'unknown'); }
-  finally { alertScanRunning = false; }
+  finally {
+    if (redis && lockAcquired) await redis.del(alertScanLockKey).catch(() => undefined);
+    alertScanRunning = false;
+  }
 }
 if (alertScanEnabled) {
   const timer = setInterval(() => void runAlertScan(), alertScanIntervalMs);

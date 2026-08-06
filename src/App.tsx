@@ -167,6 +167,7 @@ export default function App() {
   const [showAlertCenter, setShowAlertCenter] = useState(false);
   const [alertKind, setAlertKind] = useState<AlertKind>('price_change');
   const [alertThreshold, setAlertThreshold] = useState('5');
+  const [alertsRefreshing, setAlertsRefreshing] = useState(false);
   const requestRef = useRef<AbortController | null>(null);
   const importedAccountRef = useRef<string | null>(null);
 
@@ -228,6 +229,18 @@ export default function App() {
     return payload as CloudWorkspace;
   }, [auth]);
 
+  const refreshAlerts = useCallback(async (showError = false) => {
+    if (!accountUser || !auth) return;
+    setAlertsRefreshing(true);
+    try {
+      applyWorkspace(await accountRequest('/api/account/alerts'));
+    } catch (reason) {
+      if (showError) setMessage((reason as Error).message || '提醒暂时无法刷新，请稍后重试。');
+    } finally {
+      setAlertsRefreshing(false);
+    }
+  }, [accountUser, auth, accountRequest, applyWorkspace]);
+
   useEffect(() => {
     let active = true;
     let unsubscribe: (() => void) | undefined;
@@ -266,6 +279,20 @@ export default function App() {
     void sync();
     return () => { active = false; };
   }, [accountRequest, accountUser, activePortfolio.name, applyWorkspace, auth, holdings, watchlist]);
+
+  useEffect(() => {
+    if (!accountUser || !auth || accountState !== 'ready') return;
+    let active = true;
+    const refresh = async () => {
+      if (!active || document.visibilityState === 'hidden') return;
+      try { applyWorkspace(await accountRequest('/api/account/alerts')); } catch { /* Keep the last known reminders during a transient network error. */ }
+    };
+    const timer = window.setInterval(() => void refresh(), 60_000);
+    const onVisibilityChange = () => { if (document.visibilityState === 'visible') void refresh(); };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => { active = false; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisibilityChange); };
+  }, [accountUser, auth, accountState, accountRequest, applyWorkspace]);
+
   useEffect(() => {
     const plugin = getDeepLinkPlugin();
     let disposed = false;
@@ -515,6 +542,7 @@ export default function App() {
           {snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">暂无可用事件</p>}
           <button type="button" class="secondary" onClick={() => { if (!accountUser) { setMessage('请先登录后设置提醒。'); return; } setShowAlertCenter((value) => !value); }}>{showAlertCenter ? '收起提醒中心' : '提醒设置'}</button>
           {accountUser && showAlertCenter && <div class="alert-center">
+            <div class="alert-toolbar"><strong>提醒中心</strong><button type="button" class="quiet" onClick={() => void refreshAlerts(true)} disabled={alertsRefreshing}>{alertsRefreshing ? '同步中…' : '刷新提醒'}</button></div>
             <form class="alert-form" onSubmit={(event) => { event.preventDefault(); void createAlert(); }}>
               <label>提醒规则<select aria-label="提醒规则" value={alertKind} onChange={(event) => setAlertKind((event.target as HTMLSelectElement).value as AlertKind)}><option value="price_change">单日涨跌幅</option><option value="rsi_cross">RSI 极端</option><option value="trend_shift">趋势偏弱</option></select></label>
               {alertKind !== 'trend_shift' && <label>阈值<input aria-label="提醒阈值" type="number" value={alertThreshold} min={alertKind === 'rsi_cross' ? 50 : 0.1} max={alertKind === 'rsi_cross' ? 90 : 100} step={alertKind === 'rsi_cross' ? 1 : 0.1} onInput={(event) => setAlertThreshold((event.target as HTMLInputElement).value)} /></label>}

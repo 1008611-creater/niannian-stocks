@@ -28,6 +28,8 @@ const supabaseAuthConfigured = Boolean(process.env.SUPABASE_URL && process.env.S
 const verifySupabaseRequest = createSupabaseAuthVerifier({ url: process.env.SUPABASE_URL, anonKey: process.env.SUPABASE_ANON_KEY });
 const workspace = createWorkspaceStore({ url: process.env.SUPABASE_URL, serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY });
 const supabaseAuthOrigin = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const alertScanEnabled = isProduction && workspace.enabled && providerConfigured;
+const alertScanIntervalMs = Math.max(5 * 60_000, Number(process.env.NIANNIAN_ALERT_SCAN_INTERVAL_MS || 15 * 60_000));
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -49,6 +51,7 @@ app.get('/api/health', (_request, response) => response.json({
   auth: supabaseAuthConfigured ? 'configured' : 'not_configured',
   workspace: workspace.enabled ? 'configured' : 'not_configured',
   agent: agentConfigured ? 'configured' : 'not_configured',
+  alerts: alertScanEnabled ? 'enabled' : 'not_configured',
   yahooFallback: false,
 }));
 app.get('/api/auth/config', (_request, response) => response.json({
@@ -175,6 +178,48 @@ app.delete('/api/account/holdings/:id', async (request, response, next) => {
     response.json(await workspace.removeHolding(userId, request.params.id));
   } catch (error) { next(error); }
 });
+app.get('/api/account/alerts', async (request, response, next) => {
+  try {
+    const { userId } = await verifySupabaseRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.workspaceFor(userId));
+  } catch (error) { next(error); }
+});
+app.post('/api/account/alerts', async (request, response, next) => {
+  try {
+    const { userId } = await verifySupabaseRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(201).json(await workspace.createAlertRule(userId, request.body));
+  } catch (error) { next(error); }
+});
+app.delete('/api/account/alerts/:id', async (request, response, next) => {
+  try {
+    const { userId } = await verifySupabaseRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.removeAlertRule(userId, request.params.id));
+  } catch (error) { next(error); }
+});
+app.post('/api/account/alerts/notifications/:id/read', async (request, response, next) => {
+  try {
+    const { userId } = await verifySupabaseRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.markAlertRead(userId, request.params.id));
+  } catch (error) { next(error); }
+});
+
+let alertScanRunning = false;
+async function runAlertScan() {
+  if (!alertScanEnabled || alertScanRunning) return;
+  alertScanRunning = true;
+  try { console.log('alert-scan', await workspace.scanAlertRules((symbol) => market.research(symbol))); }
+  catch (error) { console.error('alert-scan-error', error?.message || 'unknown'); }
+  finally { alertScanRunning = false; }
+}
+if (alertScanEnabled) {
+  const timer = setInterval(() => void runAlertScan(), alertScanIntervalMs);
+  timer.unref?.();
+  setTimeout(() => void runAlertScan(), 30_000).unref?.();
+}
 app.use(express.static(resolve(here, '..', 'dist'), { index: 'index.html', maxAge: isProduction ? '1h' : 0, etag: true }));
 app.get('*splat', (request, response, next) => {
   if (request.path.startsWith('/api/')) return next();

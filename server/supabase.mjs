@@ -12,6 +12,7 @@ function validSymbol(value) { return typeof value === 'string' && symbolPattern.
 function numberOrNull(value) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
 function nonEmptyName(value) { return typeof value === 'string' ? value.trim().slice(0, 40) : ''; }
 function isUuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
+const alertKinds = new Set(['price_change', 'rsi_cross', 'trend_shift']);
 
 export function createWorkspaceStore({ url, serviceRoleKey }) {
   const origin = String(url || '').replace(/\/$/, '');
@@ -42,18 +43,83 @@ export function createWorkspaceStore({ url, serviceRoleKey }) {
   }
 
   async function workspaceFor(userId) {
-    const [portfolios, holdings, watchlist, entitlement] = await Promise.all([
+    const [portfolios, holdings, watchlist, entitlement, alerts, notifications] = await Promise.all([
       request('niannian_portfolios', { query: { select: 'id,name,is_default,created_at,updated_at', user_id: `eq.${userId}`, order: 'is_default.desc,created_at.asc' } }),
       request('niannian_holdings', { query: { select: 'id,portfolio_id,symbol,quantity,average_cost,updated_at', user_id: `eq.${userId}`, order: 'updated_at.desc' } }),
       request('niannian_watchlist_items', { query: { select: 'id,symbol,created_at', user_id: `eq.${userId}`, order: 'created_at.asc' } }),
       request('niannian_entitlements', { query: { select: 'plan_key,valid_until,features,updated_at', user_id: `eq.${userId}`, limit: 1 } }),
+      request('niannian_alert_rules', { query: { select: 'id,symbol,kind,threshold,enabled,updated_at', user_id: `eq.${userId}`, order: 'updated_at.desc', limit: 50 } }),
+      request('niannian_alert_deliveries', { query: { select: 'id,alert_rule_id,symbol,period_key,status,value,triggered_at,delivered_at,read_at', user_id: `eq.${userId}`, order: 'triggered_at.desc', limit: 50 } }),
     ]);
     return {
       portfolios: portfolios || [],
       holdings: (holdings || []).map((item) => ({ ...item, quantity: Number(item.quantity), averageCost: Number(item.average_cost) })),
       watchlist: (watchlist || []).map((item) => item.symbol),
+      alerts: alerts || [],
+      notifications: notifications || [],
       entitlement: entitlement?.[0] || { plan_key: 'free', valid_until: null, features: { cloudSync: false, backgroundAlerts: false, earningsEvents: false, aiResearch: false, advancedScreener: false } },
     };
+  }
+
+  async function createAlertRule(userId, payload) {
+    const symbol = String(payload?.symbol || '').trim().toUpperCase();
+    const kind = String(payload?.kind || '');
+    const threshold = numberOrNull(payload?.threshold);
+    if (!validSymbol(symbol) || !alertKinds.has(kind)) throw new WorkspaceError('invalid_alert', 400, '提醒标的或规则类型不正确。');
+    if (kind === 'price_change' && (threshold === null || threshold <= 0 || threshold > 100)) throw new WorkspaceError('invalid_alert', 400, '涨跌幅阈值需在 0 到 100 之间。');
+    if (kind === 'rsi_cross' && (threshold === null || threshold < 50 || threshold > 90)) throw new WorkspaceError('invalid_alert', 400, 'RSI 阈值需在 50 到 90 之间。');
+    const normalizedThreshold = kind === 'trend_shift' ? 0 : threshold;
+    const existing = await request('niannian_alert_rules', { query: { select: 'id', user_id: `eq.${userId}`, symbol: `eq.${symbol}`, kind: `eq.${kind}`, enabled: 'eq.true', limit: 1 } });
+    if (!existing?.length) await request('niannian_alert_rules', { method: 'POST', body: { user_id: userId, symbol, kind, threshold: normalizedThreshold, enabled: true }, prefer: 'return=minimal' });
+    return workspaceFor(userId);
+  }
+
+  async function removeAlertRule(userId, id) {
+    if (!isUuid(id)) throw new WorkspaceError('invalid_alert', 400, '提醒规则格式不正确。');
+    await request('niannian_alert_rules', { method: 'DELETE', query: { id: `eq.${id}`, user_id: `eq.${userId}` }, prefer: 'return=minimal' });
+    return workspaceFor(userId);
+  }
+
+  async function markAlertRead(userId, id) {
+    if (!isUuid(id)) throw new WorkspaceError('invalid_alert', 400, '提醒记录格式不正确。');
+    await request('niannian_alert_deliveries', { method: 'PATCH', query: { id: `eq.${id}`, user_id: `eq.${userId}` }, body: { status: 'read', read_at: new Date().toISOString() }, prefer: 'return=minimal' });
+    return workspaceFor(userId);
+  }
+
+  function alertMatch(rule, snapshot) {
+    if (rule.kind === 'price_change') return Math.abs(Number(snapshot?.summary?.changePct)) >= Number(rule.threshold);
+    if (rule.kind === 'rsi_cross') {
+      const rsi = Number(snapshot?.summary?.rsi14);
+      return Number.isFinite(rsi) && (rsi >= Number(rule.threshold) || rsi <= 100 - Number(rule.threshold));
+    }
+    return snapshot?.summary?.trend === 'bearish';
+  }
+
+  function alertValue(rule, snapshot) {
+    if (rule.kind === 'price_change') return Number(snapshot.summary.changePct);
+    if (rule.kind === 'rsi_cross') return Number(snapshot.summary.rsi14);
+    return snapshot.summary.trend === 'bullish' ? 1 : -1;
+  }
+
+  async function scanAlertRules(research) {
+    const rules = await request('niannian_alert_rules', { query: { select: 'id,user_id,symbol,kind,threshold', enabled: 'eq.true', order: 'updated_at.desc', limit: 100 } });
+    const snapshots = new Map(); const result = { rules: rules?.length || 0, triggered: 0, skipped: 0, failed: 0 };
+    for (const rule of rules || []) {
+      try {
+        if (!snapshots.has(rule.symbol)) snapshots.set(rule.symbol, await research(rule.symbol));
+        const snapshot = snapshots.get(rule.symbol);
+        if (!alertMatch(rule, snapshot)) { result.skipped += 1; continue; }
+        const periodKey = `${snapshot.candles?.at(-1)?.time || new Date().toISOString().slice(0, 10)}:${rule.kind}`;
+        const existing = await request('niannian_alert_deliveries', { query: { select: 'id', alert_rule_id: `eq.${rule.id}`, period_key: `eq.${periodKey}`, limit: 1 } });
+        if (existing?.length) { result.skipped += 1; continue; }
+        await request('niannian_alert_deliveries', { method: 'POST', query: { on_conflict: 'alert_rule_id,period_key' }, body: { user_id: rule.user_id, alert_rule_id: rule.id, symbol: rule.symbol, period_key: periodKey, status: 'triggered', value: alertValue(rule, snapshot) }, prefer: 'resolution=ignore-duplicates,return=minimal' });
+        result.triggered += 1;
+      } catch (error) {
+        result.failed += 1;
+        console.error('alert-scan-rule-error', rule.symbol, rule.kind, error?.message || 'unknown');
+      }
+    }
+    return result;
   }
 
   async function planFor(userId) {
@@ -158,5 +224,5 @@ export function createWorkspaceStore({ url, serviceRoleKey }) {
     return workspaceFor(userId);
   }
 
-  return { enabled, workspaceFor, importFirstWorkspace, addWatchlistItem, removeWatchlistItem, createPortfolio, saveHolding, removeHolding };
+  return { enabled, workspaceFor, importFirstWorkspace, addWatchlistItem, removeWatchlistItem, createPortfolio, saveHolding, removeHolding, createAlertRule, removeAlertRule, markAlertRead, scanAlertRules };
 }

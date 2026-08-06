@@ -3,7 +3,7 @@ import { ApiError, loadResearch } from './api';
 import { authHeader, loadSupabaseAuth } from './auth';
 import { EquityChart, PriceChart } from './chart';
 import { legacyImportAvailable, localDefaultPortfolio, readHoldings, readPortfolios, readWatchlist, saveHoldings, savePortfolios, saveWatchlist, validSymbol } from './storage';
-import type { AgentReport, Holding, Portfolio, Snapshot } from './types';
+import type { AgentReport, AlertKind, AlertNotification, AlertRule, Holding, Portfolio, Snapshot } from './types';
 
 const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
@@ -98,6 +98,8 @@ type CloudWorkspace = {
   portfolios: { id: string; name: string; is_default: boolean }[];
   holdings: { id: string; portfolio_id: string; symbol: string; quantity: number; averageCost: number }[];
   watchlist: string[];
+  alerts: AlertRule[];
+  notifications: AlertNotification[];
   entitlement?: { plan_key?: string };
 };
 type AccountError = Error & { status?: number; code?: string };
@@ -106,6 +108,24 @@ function accountError(response: Response, payload: { error?: string; message?: s
   const error = new Error(payload.message || '账户服务暂时不可用，请稍后重试。') as AccountError;
   error.status = response.status; error.code = payload.error;
   return error;
+}
+
+function alertKindLabel(kind: AlertKind) {
+  if (kind === 'price_change') return '单日涨跌幅';
+  if (kind === 'rsi_cross') return 'RSI 极端';
+  return '趋势偏弱';
+}
+
+function alertRuleDescription(rule: AlertRule) {
+  if (rule.kind === 'price_change') return `单日涨跌幅达到 ${rule.threshold}%`;
+  if (rule.kind === 'rsi_cross') return `RSI 达到 ${rule.threshold} 或低于 ${100 - rule.threshold}`;
+  return 'MA20 低于 MA50';
+}
+
+function alertNotificationDescription(notification: AlertNotification, rule?: AlertRule) {
+  if (rule?.kind === 'price_change') return `${notification.symbol} 单日涨跌幅达到 ${notification.value >= 0 ? '+' : ''}${notification.value.toFixed(2)}%`;
+  if (rule?.kind === 'rsi_cross') return `${notification.symbol} RSI 当前为 ${notification.value.toFixed(1)}`;
+  return `${notification.symbol} 当前 MA20 低于 MA50`;
 }
 
 export default function App() {
@@ -142,6 +162,11 @@ export default function App() {
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentQuestion, setAgentQuestion] = useState<string>(researchPrompts[0].question);
+  const [alerts, setAlerts] = useState<AlertRule[]>([]);
+  const [notifications, setNotifications] = useState<AlertNotification[]>([]);
+  const [showAlertCenter, setShowAlertCenter] = useState(false);
+  const [alertKind, setAlertKind] = useState<AlertKind>('price_change');
+  const [alertThreshold, setAlertThreshold] = useState('5');
   const requestRef = useRef<AbortController | null>(null);
   const importedAccountRef = useRef<string | null>(null);
 
@@ -190,7 +215,7 @@ export default function App() {
       setPortfolios(nextPortfolios);
       setActivePortfolioId((current) => nextPortfolios.some((item) => item.id === current) ? current : nextPortfolios[0].id);
     }
-    setHoldings(nextHoldings); setWatchlist(nextWatchlist);
+    setHoldings(nextHoldings); setWatchlist(nextWatchlist); setAlerts(Array.isArray(next.alerts) ? next.alerts : []); setNotifications(Array.isArray(next.notifications) ? next.notifications : []);
   }, []);
 
   const accountRequest = useCallback(async (path: string, options: RequestInit = {}) => {
@@ -361,6 +386,24 @@ export default function App() {
     } catch (reason) { setMessage((reason as Error).message || '验证码暂时无法重新发送，请稍后再试。'); }
     finally { setAuthSubmitting(false); }
   }
+  async function createAlert() {
+    if (!accountUser) { setMessage('请先登录后设置提醒。'); return; }
+    const threshold = alertKind === 'trend_shift' ? 0 : Number(alertThreshold);
+    if (alertKind === 'price_change' && (!Number.isFinite(threshold) || threshold <= 0 || threshold > 100)) { setMessage('涨跌幅阈值需在 0 到 100 之间。'); return; }
+    if (alertKind === 'rsi_cross' && (!Number.isFinite(threshold) || threshold < 50 || threshold > 90)) { setMessage('RSI 阈值需在 50 到 90 之间。'); return; }
+    try {
+      applyWorkspace(await accountRequest('/api/account/alerts', { method: 'POST', body: JSON.stringify({ symbol, kind: alertKind, threshold }) }));
+      setMessage(`${symbol} 的${alertKindLabel(alertKind)}提醒已保存。`);
+    } catch (reason) { setMessage((reason as Error).message); }
+  }
+  async function removeAlert(id: string) {
+    try { applyWorkspace(await accountRequest(`/api/account/alerts/${encodeURIComponent(id)}`, { method: 'DELETE' })); setMessage('提醒已移除。'); }
+    catch (reason) { setMessage((reason as Error).message); }
+  }
+  async function markNotificationRead(id: string) {
+    try { applyWorkspace(await accountRequest(`/api/account/alerts/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' })); }
+    catch (reason) { setMessage((reason as Error).message); }
+  }
   async function signOut() { if (!auth) return; await auth.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setShowAuth(false); setAwaitingEmailCode(false); setVerificationCode(''); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
   async function runAgentResearch(nextQuestion: string = agentQuestion) {
     if (!snapshot) return;
@@ -467,7 +510,20 @@ export default function App() {
       <aside class="secondary-column">
         <section class="surface"><div class="section-head"><h2>自选股</h2></div><form class="compact-form" onSubmit={addWatch}><input aria-label="添加自选美股代码" placeholder="例如 META" value={watchInput} maxlength={10} onInput={(event) => setWatchInput((event.target as HTMLInputElement).value.toUpperCase())} /><button type="submit">添加</button></form><ul class="symbol-list">{watchlist.map((item) => <li key={item}><button type="button" class={item === symbol ? 'active-symbol' : ''} onClick={() => chooseSymbol(item)}>{item}</button><button type="button" class="remove" aria-label={`删除 ${item}`} onClick={() => void removeWatch(item)}>移除</button></li>)}</ul></section>
         <section class="surface"><div class="section-head"><h2>技术摘要</h2></div>{snapshot && <dl class="facts"><div><dt>RSI(14)</dt><dd>{snapshot.summary.rsi14 ?? '样本不足'}</dd></div><div><dt>成交量比</dt><dd>{snapshot.summary.volumeRatio ? `${snapshot.summary.volumeRatio}×` : '样本不足'}</dd></div><div><dt>MA20 / MA50</dt><dd>{snapshot.summary.ma20} / {snapshot.summary.ma50}</dd></div><div><dt>20 日区间</dt><dd>{snapshot.summary.support20} 至 {snapshot.summary.resistance20}</dd></div></dl>}</section>
-        <section class="surface events-panel"><div class="section-head"><h2>事件与提醒</h2></div>{snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">暂无可用事件</p>}<button type="button" class="secondary" onClick={() => setMessage('提醒设置将在账户同步开放后启用。')}>提醒设置</button></section>
+        <section class="surface events-panel">
+          <div class="section-head"><h2>事件与提醒</h2>{notifications.some((item) => item.status !== 'read') && <span class="alert-count">{notifications.filter((item) => item.status !== 'read').length} 条新提醒</span>}</div>
+          {snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">暂无可用事件</p>}
+          <button type="button" class="secondary" onClick={() => { if (!accountUser) { setMessage('请先登录后设置提醒。'); return; } setShowAlertCenter((value) => !value); }}>{showAlertCenter ? '收起提醒中心' : '提醒设置'}</button>
+          {accountUser && showAlertCenter && <div class="alert-center">
+            <form class="alert-form" onSubmit={(event) => { event.preventDefault(); void createAlert(); }}>
+              <label>提醒规则<select aria-label="提醒规则" value={alertKind} onChange={(event) => setAlertKind((event.target as HTMLSelectElement).value as AlertKind)}><option value="price_change">单日涨跌幅</option><option value="rsi_cross">RSI 极端</option><option value="trend_shift">趋势偏弱</option></select></label>
+              {alertKind !== 'trend_shift' && <label>阈值<input aria-label="提醒阈值" type="number" value={alertThreshold} min={alertKind === 'rsi_cross' ? 50 : 0.1} max={alertKind === 'rsi_cross' ? 90 : 100} step={alertKind === 'rsi_cross' ? 1 : 0.1} onInput={(event) => setAlertThreshold((event.target as HTMLInputElement).value)} /></label>}
+              <button type="submit">为 {symbol} 添加</button>
+            </form>
+            <div class="alert-block"><strong>已设置</strong>{alerts.length ? <ul class="alert-list">{alerts.map((rule) => <li key={rule.id}><span><b>{rule.symbol}</b> · {alertRuleDescription(rule)}</span><button type="button" class="remove" aria-label={`删除 ${rule.symbol} ${alertKindLabel(rule.kind)}提醒`} onClick={() => void removeAlert(rule.id)}>移除</button></li>)}</ul> : <p class="muted">还没有提醒规则。</p>}</div>
+            <div class="alert-block"><strong>提醒记录</strong>{notifications.length ? <ul class="alert-list notification-list">{notifications.slice(0, 10).map((notification) => { const rule = alerts.find((item) => item.id === notification.alert_rule_id); return <li key={notification.id} class={notification.status === 'read' ? 'read' : ''}><span>{alertNotificationDescription(notification, rule)}<small>{new Date(notification.triggered_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</small></span>{notification.status !== 'read' && <button type="button" class="quiet" onClick={() => void markNotificationRead(notification.id)}>标为已读</button>}</li>; })}</ul> : <p class="muted">触发后会显示在这里。</p>}</div>
+          </div>}
+        </section>
       </aside>
     </section>
 

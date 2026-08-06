@@ -22,6 +22,12 @@
 2. Authentication → Emails → SMTP Settings：启用自定义 SMTP，填写 `smtp.qq.com`、端口 `465`、你的 QQ 邮箱、QQ 邮箱生成的 SMTP 授权码、发件人邮箱（同一个 QQ 邮箱）和发件人名称“念念智股”。QQ SMTP 授权码不是 QQ 登录密码，不要发送给任何人或写进 Railway。
 3. Authentication → Emails → Templates → Confirm signup：邮件正文必须使用 `{{ .Token }}`，以便注册用户输入 Supabase 当前生成的 8 位验证码，而非点击验证链接。
 
+### 认证验收规则
+
+- 当前 Supabase 项目按 8 位数字验证码验收；注册页面的提示、输入框长度和前端校验必须保持一致。
+- 发布后打开正式站的注册流程，确认页面显示“8 位验证码”，输入框最多 8 位，并确认源码或线上资源中不存在旧的“6 位验证码”提示。
+- 验证码发送仍以 Supabase 实际邮件为准；不要通过前端放宽长度来掩盖模板或上游配置错误。
+
 生产模式没有 Upstash 时，`/api/market/research` 会返回 `service_not_configured`，避免无缓存、无限流的误上线。当前候选不使用 Yahoo Finance 回退。
 
 ## Cloudflare

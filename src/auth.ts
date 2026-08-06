@@ -31,6 +31,7 @@ export type SupabaseAuthClient = {
   user: AuthUser | null;
   addListener: (listener: () => void) => () => void;
   signUp: (email: string, password: string) => Promise<{ emailConfirmationRequired: boolean }>;
+  verifyEmailCode: (email: string, code: string) => Promise<void>;
   signInWithPassword: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 };
@@ -62,10 +63,16 @@ async function createClient(config: Required<Pick<AuthConfig, 'url' | 'anonKey'>
     user: null,
     addListener(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     async signUp(email, password) {
-      const result = await request('/auth/v1/signup', { email, password, data: {}, email_redirect_to: window.location.origin });
+      const result = await request('/auth/v1/signup', { email, password, data: {} });
       const session = normalizeSession(result);
       if (session) await setSession(session);
       return { emailConfirmationRequired: !session };
+    },
+    async verifyEmailCode(email, code) {
+      const result = await request('/auth/v1/verify', { email, token: code, type: 'signup' });
+      const session = normalizeSession(result);
+      if (!session) throw new Error('验证码验证未返回有效登录状态，请重新获取验证码。');
+      await setSession(session);
     },
     async signInWithPassword(email, password) {
       const result = await request('/auth/v1/token?grant_type=password', { email, password });

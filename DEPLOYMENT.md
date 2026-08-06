@@ -18,8 +18,9 @@
 
 在 Supabase Dashboard 完成两项配置后，用户就可以用 QQ 邮箱注册并同步：
 
-1. Authentication → Providers → Email：启用邮箱/密码登录；Authentication → URL Configuration：将 Site URL 填为 `https://stocks.cauai.fun`，并添加 `https://stocks.cauai.fun/*` 到 Redirect URLs。
-2. Authentication → SMTP Settings：启用自定义 SMTP，填写 `smtp.qq.com`、端口 `465`、你的 QQ 邮箱、QQ 邮箱生成的 SMTP 授权码、发件人邮箱（同一个 QQ 邮箱）和发件人名称“念念智股”。QQ SMTP 授权码不是 QQ 登录密码，不要发送给任何人或写进 Railway。
+1. Authentication → Sign In / Providers：启用邮箱/密码登录；Authentication → URL Configuration：将 Site URL 填为 `https://stocks.cauai.fun`，并添加 `https://stocks.cauai.fun/*` 到 Redirect URLs。
+2. Authentication → Emails → SMTP Settings：启用自定义 SMTP，填写 `smtp.qq.com`、端口 `465`、你的 QQ 邮箱、QQ 邮箱生成的 SMTP 授权码、发件人邮箱（同一个 QQ 邮箱）和发件人名称“念念智股”。QQ SMTP 授权码不是 QQ 登录密码，不要发送给任何人或写进 Railway。
+3. Authentication → Emails → Templates → Confirm signup：邮件正文必须使用 `{{ .Token }}`，以便注册用户输入 6 位验证码而非点击验证链接。
 
 生产模式没有 Upstash 时，`/api/market/research` 会返回 `service_not_configured`，避免无缓存、无限流的误上线。当前候选不使用 Yahoo Finance 回退。
 

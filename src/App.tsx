@@ -135,6 +135,8 @@ export default function App() {
   const [authMode, setAuthMode] = useState<'sign_in' | 'sign_up'>('sign_in');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [awaitingEmailCode, setAwaitingEmailCode] = useState(false);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
@@ -301,7 +303,7 @@ export default function App() {
   async function removePosition(id: string) { try { if (accountUser) applyWorkspace(await accountRequest(`/api/account/holdings/${encodeURIComponent(id)}`, { method: 'DELETE' })); else setHoldings(holdings.filter((holding) => holding.id !== id)); setMessage('持仓已移除。'); } catch (reason) { setMessage((reason as Error).message); } }
   async function requestNewPortfolio() { if (!accountUser) { setMessage('免费层最多 1 个组合。完成登录并获得 Pro 权益后，可在这里创建最多 5 个组合。'); return; } const name = window.prompt('请输入新组合名称（最多 40 个字）'); if (!name?.trim()) return; try { const next = await accountRequest('/api/account/portfolios', { method: 'POST', body: JSON.stringify({ name }) }); applyWorkspace(next); const created = next.portfolios.find((item) => item.name === name.trim()); if (created) setActivePortfolioId(created.id); setMessage('新组合已创建并同步到云端。'); } catch (reason) { setMessage((reason as Error).message); } }
   function importLegacy() { setShowImport(false); setMessage(accountUser ? '登录时会优先保留云端数据；当前本机草稿仅在云端为空时首次导入。' : '登录后，本机自选和持仓会一次性导入当前账户。'); }
-  function startSignIn() { if (!auth) { setMessage('邮箱登录服务尚未完成配置，请先完成 Supabase SMTP 设置。'); return; } setShowAuth(true); }
+  function startSignIn() { if (!auth) { setMessage('邮箱登录服务尚未完成配置，请先完成 Supabase SMTP 设置。'); return; } setAwaitingEmailCode(false); setVerificationCode(''); setShowAuth(true); }
   async function submitEmailAuth(event: Event) {
     event.preventDefault();
     if (!auth) { setMessage('邮箱登录服务尚未完成配置，请稍后再试。'); return; }
@@ -312,7 +314,12 @@ export default function App() {
     try {
       if (authMode === 'sign_up') {
         const result = await auth.signUp(normalizedEmail, password);
-        setMessage(result.emailConfirmationRequired ? '验证邮件已发送，请打开 QQ 邮箱完成验证后再登录。' : '账户已创建，正在同步云端资料。');
+        if (result.emailConfirmationRequired) {
+          setPassword(''); setVerificationCode(''); setAwaitingEmailCode(true);
+          setMessage('验证码已发送，请在 QQ 邮箱中查看后输入。');
+          return;
+        }
+        setMessage('账户已创建，正在同步云端资料。');
       } else {
         await auth.signInWithPassword(normalizedEmail, password);
         setMessage('登录成功，正在同步云端组合。');
@@ -321,7 +328,22 @@ export default function App() {
     } catch (reason) { setMessage((reason as Error).message || '邮箱登录暂时不可用，请稍后再试。'); }
     finally { setAuthSubmitting(false); }
   }
-  async function signOut() { if (!auth) return; await auth.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setShowAuth(false); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
+  async function submitEmailCode(event: Event) {
+    event.preventDefault();
+    if (!auth) { setMessage('邮箱登录服务尚未完成配置，请稍后再试。'); return; }
+    const normalizedEmail = email.trim().toLowerCase();
+    const code = verificationCode.trim();
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) { setMessage('请先填写注册邮箱。'); return; }
+    if (!/^\d{6}$/.test(code)) { setMessage('请输入 QQ 邮箱中的 6 位验证码。'); return; }
+    setAuthSubmitting(true); setMessage('');
+    try {
+      await auth.verifyEmailCode(normalizedEmail, code);
+      setVerificationCode(''); setAwaitingEmailCode(false); setShowAuth(false);
+      setMessage('验证成功，正在同步云端组合。');
+    } catch (reason) { setMessage((reason as Error).message || '验证码无效或已过期，请重新注册获取新验证码。'); }
+    finally { setAuthSubmitting(false); }
+  }
+  async function signOut() { if (!auth) return; await auth.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setShowAuth(false); setAwaitingEmailCode(false); setVerificationCode(''); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
   async function runAgentResearch(nextQuestion: string = agentQuestion) {
     if (!snapshot) return;
     setAgentLoading(true); setMessage('');
@@ -380,16 +402,20 @@ export default function App() {
       <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span><span>{accountState === 'ready' && accountUser ? '已同步' : accountState === 'syncing' ? '同步中' : accountState === 'error' ? '同步未完成' : '免费层'}</span>{accountUser ? <><span class="account-email" title={accountUser.email}>{accountUser.email}</span><button class="quiet" onClick={() => void signOut()}>退出登录</button></> : <button class="quiet" onClick={startSignIn} disabled={accountState === 'loading'} aria-expanded={showAuth}>{accountState === 'loading' ? '准备登录…' : accountState === 'unavailable' ? '登录待配置' : '登录与同步'}</button>}</div>
     </header>
     {showAuth && <section class="auth-panel" aria-label="邮箱登录与注册">
-      <div class="auth-heading"><strong>{authMode === 'sign_in' ? '登录并同步' : '注册 QQ 邮箱'}</strong><button type="button" class="quiet" onClick={() => { setShowAuth(false); setPassword(''); }}>收起</button></div>
-      <div class="auth-tabs" role="tablist" aria-label="账户操作">
+      <div class="auth-heading"><strong>{awaitingEmailCode ? '输入验证码' : authMode === 'sign_in' ? '登录并同步' : '注册 QQ 邮箱'}</strong><button type="button" class="quiet" onClick={() => { setShowAuth(false); setPassword(''); setVerificationCode(''); setAwaitingEmailCode(false); }}>收起</button></div>
+      {awaitingEmailCode ? <form class="auth-form verification-form" onSubmit={submitEmailCode}>
+        <label>验证码<input type="text" value={verificationCode} inputMode="numeric" autocomplete="one-time-code" placeholder="6 位验证码" maxlength={6} onInput={(event) => setVerificationCode((event.target as HTMLInputElement).value.replace(/\D/g, ''))} disabled={authSubmitting} required /></label>
+        <button type="submit" disabled={authSubmitting}>{authSubmitting ? '正在验证…' : '验证并同步'}</button>
+        <button type="button" class="secondary" onClick={() => { setAwaitingEmailCode(false); setVerificationCode(''); setMessage(''); }} disabled={authSubmitting}>返回注册</button>
+      </form> : <><div class="auth-tabs" role="tablist" aria-label="账户操作">
         <button type="button" role="tab" aria-selected={authMode === 'sign_in'} class={authMode === 'sign_in' ? 'active' : ''} onClick={() => { setAuthMode('sign_in'); setMessage(''); }}>邮箱登录</button>
         <button type="button" role="tab" aria-selected={authMode === 'sign_up'} class={authMode === 'sign_up' ? 'active' : ''} onClick={() => { setAuthMode('sign_up'); setMessage(''); }}>注册 QQ 邮箱</button>
       </div>
       <form class="auth-form" onSubmit={submitEmailAuth}>
         <label>邮箱<input type="email" value={email} inputMode="email" autocomplete="email" placeholder="name@qq.com" onInput={(event) => setEmail((event.target as HTMLInputElement).value)} disabled={authSubmitting} required /></label>
         <label>密码<input type="password" value={password} autocomplete={authMode === 'sign_up' ? 'new-password' : 'current-password'} placeholder="至少 8 位" minlength={8} onInput={(event) => setPassword((event.target as HTMLInputElement).value)} disabled={authSubmitting} required /></label>
-        <button type="submit" disabled={authSubmitting}>{authSubmitting ? '正在处理…' : authMode === 'sign_in' ? '登录并同步' : '创建账户'}</button>
-      </form>
+        <button type="submit" disabled={authSubmitting}>{authSubmitting ? '正在处理…' : authMode === 'sign_in' ? '登录并同步' : '获取验证码'}</button>
+      </form></>}
     </section>}
     {message && <p class="notice" role="status" aria-live="polite">{message}</p>}
     {showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}

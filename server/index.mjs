@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
 import { createMarketService, MarketError, normalizeSymbol } from './market.mjs';
-import { AuthError, createClerkVerifier } from './auth.mjs';
+import { AuthError, createSupabaseAuthVerifier } from './auth.mjs';
 import { WorkspaceError, createWorkspaceStore } from './supabase.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -24,12 +24,14 @@ const redis = upstashConfigured ? new Redis({ url: process.env.UPSTASH_REDIS_RES
 const market = createMarketService({ redis, isProduction });
 const rateLimit = redis ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(30, '1 m'), prefix: 'stocks:ratelimit:market' }) : null;
 const agentRateLimit = redis ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(4, '10 m'), prefix: 'stocks:ratelimit:agent' }) : null;
-const verifyClerkRequest = createClerkVerifier({ issuerDomain: process.env.CLERK_JWT_ISSUER_DOMAIN });
+const supabaseAuthConfigured = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY);
+const verifySupabaseRequest = createSupabaseAuthVerifier({ url: process.env.SUPABASE_URL, anonKey: process.env.SUPABASE_ANON_KEY });
 const workspace = createWorkspaceStore({ url: process.env.SUPABASE_URL, serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY });
+const supabaseAuthOrigin = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
-app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], baseUri: ["'self'"], frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://clerk.stocks.cauai.fun', 'https://img.clerk.com'], connectSrc: ["'self'", 'https://clerk.stocks.cauai.fun'], frameSrc: ['https://clerk.stocks.cauai.fun'] } }, crossOriginEmbedderPolicy: false }));
+app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], baseUri: ["'self'"], frameAncestors: ["'none'"], objectSrc: ["'none'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:'], connectSrc: ["'self'", ...(supabaseAuthOrigin ? [supabaseAuthOrigin] : [])], frameSrc: ["'self'"] } }, crossOriginEmbedderPolicy: false }));
 app.use(express.json({ limit: '16kb' }));
 
 function requestIdentity(request) {
@@ -44,14 +46,14 @@ app.get('/api/health', (_request, response) => response.json({
   environment: isProduction ? 'production' : 'development',
   redis: upstashConfigured ? 'configured' : 'development_fallback',
   market: providerConfigured ? 'configured' : 'not_configured',
-  clerk: process.env.CLERK_JWT_ISSUER_DOMAIN ? 'configured' : 'not_configured',
+  auth: supabaseAuthConfigured ? 'configured' : 'not_configured',
   workspace: workspace.enabled ? 'configured' : 'not_configured',
   agent: agentConfigured ? 'configured' : 'not_configured',
   yahooFallback: false,
 }));
 app.get('/api/auth/config', (_request, response) => response.json({
-  configured: Boolean(process.env.CLERK_JWT_ISSUER_DOMAIN && process.env.CLERK_PUBLISHABLE_KEY),
-  ...(process.env.CLERK_JWT_ISSUER_DOMAIN && process.env.CLERK_PUBLISHABLE_KEY ? { frontendApi: process.env.CLERK_JWT_ISSUER_DOMAIN, publishableKey: process.env.CLERK_PUBLISHABLE_KEY } : {}),
+  configured: supabaseAuthConfigured,
+  ...(supabaseAuthConfigured ? { url: supabaseAuthOrigin, anonKey: process.env.SUPABASE_ANON_KEY } : {}),
 }));
 app.get('/api/market/research', async (request, response, next) => {
   try {
@@ -126,49 +128,49 @@ app.post('/api/agent/research', async (request, response, next) => {
 });
 app.get('/api/account/workspace', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.json(await workspace.workspaceFor(userId));
   } catch (error) { next(error); }
 });
 app.post('/api/account/workspace/import', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.status(201).json(await workspace.importFirstWorkspace(userId, request.body));
   } catch (error) { next(error); }
 });
 app.post('/api/account/watchlist', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.json(await workspace.addWatchlistItem(userId, request.body?.symbol));
   } catch (error) { next(error); }
 });
 app.delete('/api/account/watchlist/:symbol', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.json(await workspace.removeWatchlistItem(userId, request.params.symbol));
   } catch (error) { next(error); }
 });
 app.post('/api/account/portfolios', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.status(201).json(await workspace.createPortfolio(userId, request.body?.name));
   } catch (error) { next(error); }
 });
 app.post('/api/account/holdings', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.json(await workspace.saveHolding(userId, request.body));
   } catch (error) { next(error); }
 });
 app.delete('/api/account/holdings/:id', async (request, response, next) => {
   try {
-    const { userId } = await verifyClerkRequest(request);
+    const { userId } = await verifySupabaseRequest(request);
     response.setHeader('Cache-Control', 'no-store');
     response.json(await workspace.removeHolding(userId, request.params.id));
   } catch (error) { next(error); }

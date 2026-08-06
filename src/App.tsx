@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiError, loadResearch } from './api';
-import { authHeader, loadClerk } from './auth';
+import { authHeader, loadSupabaseAuth } from './auth';
 import { EquityChart, PriceChart } from './chart';
 import { legacyImportAvailable, localDefaultPortfolio, readHoldings, readPortfolios, readWatchlist, saveHoldings, savePortfolios, saveWatchlist, validSymbol } from './storage';
 import type { AgentReport, Holding, Portfolio, Snapshot } from './types';
@@ -9,7 +9,6 @@ const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: '
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
 const defaultSnapshot = 'NVDA';
 const pendingAgentResearchStorageKey = 'niannian.pending-agent-research';
-const internalBeta = true;
 const researchPrompts = [
   { label: '趋势与风险', question: '请解释当前趋势、关键风险与失效条件，并指出下一次日线应核查什么。' },
   { label: '回测复盘', question: '请比较研究策略与买入持有的表现，说明回撤和策略失效风险。' },
@@ -129,9 +128,14 @@ export default function App() {
   const [showImport, setShowImport] = useState(legacyImportAvailable);
   const [refreshing, setRefreshing] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
-  const [clerk, setClerk] = useState<Awaited<ReturnType<typeof loadClerk>>>(null);
+  const [auth, setAuth] = useState<Awaited<ReturnType<typeof loadSupabaseAuth>>>(null);
   const [accountUser, setAccountUser] = useState<{ id: string; email: string } | null>(null);
   const [accountState, setAccountState] = useState<'loading' | 'signed_out' | 'syncing' | 'ready' | 'error' | 'unavailable'>('loading');
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState<'sign_in' | 'sign_up'>('sign_in');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [agentReport, setAgentReport] = useState<AgentReport | null>(null);
   const [agentLoading, setAgentLoading] = useState(false);
   const [agentQuestion, setAgentQuestion] = useState<string>(researchPrompts[0].question);
@@ -182,35 +186,34 @@ export default function App() {
   }, []);
 
   const accountRequest = useCallback(async (path: string, options: RequestInit = {}) => {
-    if (!clerk) throw new Error('请先完成登录。');
-    const headers = new Headers(await authHeader(clerk));
+    if (!auth) throw new Error('请先完成登录。');
+    const headers = new Headers(await authHeader(auth));
     if (options.body) headers.set('content-type', 'application/json');
     const response = await fetch(path, { ...options, headers, credentials: 'same-origin' });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw accountError(response, payload);
     return payload as CloudWorkspace;
-  }, [clerk]);
+  }, [auth]);
 
   useEffect(() => {
-    if (internalBeta) { setAccountState('unavailable'); return; }
     let active = true;
     let unsubscribe: (() => void) | undefined;
-    const setIdentity = (client: NonNullable<Awaited<ReturnType<typeof loadClerk>>>) => {
+    const setIdentity = (client: NonNullable<Awaited<ReturnType<typeof loadSupabaseAuth>>>) => {
       const user = client.user;
       if (!active) return;
-      setAccountUser(user ? { id: user.id, email: user.primaryEmailAddress?.emailAddress || '已登录账户' } : null);
+      setAccountUser(user ? { id: user.id, email: user.email || '已登录账户' } : null);
       setAccountState(user ? 'syncing' : 'signed_out');
     };
-    void loadClerk().then((client) => {
+    void loadSupabaseAuth().then((client) => {
       if (!active) return;
-      setClerk(client); if (!client) { setAccountState('unavailable'); return; }
+      setAuth(client); if (!client) { setAccountState('unavailable'); return; }
       setIdentity(client); unsubscribe = client.addListener(() => setIdentity(client));
     });
     return () => { active = false; unsubscribe?.(); };
   }, []);
 
   useEffect(() => {
-    if (!accountUser || !clerk || importedAccountRef.current === accountUser.id) return;
+    if (!accountUser || !auth || importedAccountRef.current === accountUser.id) return;
     let active = true;
     const sync = async () => {
       try {
@@ -229,7 +232,7 @@ export default function App() {
     };
     void sync();
     return () => { active = false; };
-  }, [accountRequest, accountUser, activePortfolio.name, applyWorkspace, clerk, holdings, watchlist]);
+  }, [accountRequest, accountUser, activePortfolio.name, applyWorkspace, auth, holdings, watchlist]);
   useEffect(() => {
     const plugin = getDeepLinkPlugin();
     let disposed = false;
@@ -298,8 +301,27 @@ export default function App() {
   async function removePosition(id: string) { try { if (accountUser) applyWorkspace(await accountRequest(`/api/account/holdings/${encodeURIComponent(id)}`, { method: 'DELETE' })); else setHoldings(holdings.filter((holding) => holding.id !== id)); setMessage('持仓已移除。'); } catch (reason) { setMessage((reason as Error).message); } }
   async function requestNewPortfolio() { if (!accountUser) { setMessage('免费层最多 1 个组合。完成登录并获得 Pro 权益后，可在这里创建最多 5 个组合。'); return; } const name = window.prompt('请输入新组合名称（最多 40 个字）'); if (!name?.trim()) return; try { const next = await accountRequest('/api/account/portfolios', { method: 'POST', body: JSON.stringify({ name }) }); applyWorkspace(next); const created = next.portfolios.find((item) => item.name === name.trim()); if (created) setActivePortfolioId(created.id); setMessage('新组合已创建并同步到云端。'); } catch (reason) { setMessage((reason as Error).message); } }
   function importLegacy() { setShowImport(false); setMessage(accountUser ? '登录时会优先保留云端数据；当前本机草稿仅在云端为空时首次导入。' : '登录后，本机自选和持仓会一次性导入当前账户。'); }
-  async function startSignIn() { const client = clerk || await loadClerk(); if (!client) { setMessage('登录服务尚未完成公开前端配置，请稍后重试。'); return; } setClerk(client); client.openSignIn({ fallbackRedirectUrl: window.location.origin, signUpFallbackRedirectUrl: window.location.origin }); }
-  async function signOut() { if (!clerk) return; await clerk.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
+  function startSignIn() { if (!auth) { setMessage('邮箱登录服务尚未完成配置，请先完成 Supabase SMTP 设置。'); return; } setShowAuth(true); }
+  async function submitEmailAuth(event: Event) {
+    event.preventDefault();
+    if (!auth) { setMessage('邮箱登录服务尚未完成配置，请稍后再试。'); return; }
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) { setMessage('请输入有效的邮箱地址。'); return; }
+    if (password.length < 8) { setMessage('密码至少需要 8 位。'); return; }
+    setAuthSubmitting(true); setMessage('');
+    try {
+      if (authMode === 'sign_up') {
+        const result = await auth.signUp(normalizedEmail, password);
+        setMessage(result.emailConfirmationRequired ? '验证邮件已发送，请打开 QQ 邮箱完成验证后再登录。' : '账户已创建，正在同步云端资料。');
+      } else {
+        await auth.signInWithPassword(normalizedEmail, password);
+        setMessage('登录成功，正在同步云端组合。');
+      }
+      setPassword(''); setShowAuth(false);
+    } catch (reason) { setMessage((reason as Error).message || '邮箱登录暂时不可用，请稍后再试。'); }
+    finally { setAuthSubmitting(false); }
+  }
+  async function signOut() { if (!auth) return; await auth.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setShowAuth(false); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
   async function runAgentResearch(nextQuestion: string = agentQuestion) {
     if (!snapshot) return;
     setAgentLoading(true); setMessage('');
@@ -340,9 +362,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (internalBeta) return;
     const pendingSymbol = window.sessionStorage.getItem(pendingAgentResearchStorageKey);
-    if (!pendingSymbol || !accountUser || !clerk || agentLoading) return;
+    if (!pendingSymbol || !accountUser || !auth || agentLoading) return;
     if (pendingSymbol !== symbol) {
       setInput(pendingSymbol);
       setSymbol(pendingSymbol);
@@ -351,15 +372,27 @@ export default function App() {
     if (!snapshot || snapshot.symbol !== pendingSymbol) return;
     window.sessionStorage.removeItem(pendingAgentResearchStorageKey);
     void runAgentResearch();
-  }, [accountUser, clerk, agentLoading, snapshot, symbol]);
+  }, [accountUser, auth, agentLoading, snapshot, symbol]);
 
   return <main>
     <header class="topbar">
       <div class="brand-lockup"><img class="brand-mark" src="/niannian-logo.svg" alt="念念智股" /><p class="brand">念念智股</p></div>
-      <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span>{internalBeta ? <span>内测版</span> : <><span>{accountState === 'ready' && accountUser ? '已同步' : accountState === 'syncing' ? '同步中' : accountState === 'error' ? '同步未完成' : '免费层'}</span>{accountUser ? <><span class="account-email" title={accountUser.email}>{accountUser.email}</span><button class="quiet" onClick={signOut}>退出登录</button></> : <button class="quiet" onClick={startSignIn} disabled={accountState === 'loading'}>{accountState === 'loading' ? '准备登录…' : accountState === 'unavailable' ? '登录待配置' : '登录与同步'}</button>}</>}</div>
+      <div class="account-status"><span class={online ? 'connection-status online' : 'connection-status'}>{online ? '在线' : '离线'}</span><span>{accountState === 'ready' && accountUser ? '已同步' : accountState === 'syncing' ? '同步中' : accountState === 'error' ? '同步未完成' : '免费层'}</span>{accountUser ? <><span class="account-email" title={accountUser.email}>{accountUser.email}</span><button class="quiet" onClick={() => void signOut()}>退出登录</button></> : <button class="quiet" onClick={startSignIn} disabled={accountState === 'loading'} aria-expanded={showAuth}>{accountState === 'loading' ? '准备登录…' : accountState === 'unavailable' ? '登录待配置' : '登录与同步'}</button>}</div>
     </header>
+    {showAuth && <section class="auth-panel" aria-label="邮箱登录与注册">
+      <div class="auth-heading"><strong>{authMode === 'sign_in' ? '登录并同步' : '注册 QQ 邮箱'}</strong><button type="button" class="quiet" onClick={() => { setShowAuth(false); setPassword(''); }}>收起</button></div>
+      <div class="auth-tabs" role="tablist" aria-label="账户操作">
+        <button type="button" role="tab" aria-selected={authMode === 'sign_in'} class={authMode === 'sign_in' ? 'active' : ''} onClick={() => { setAuthMode('sign_in'); setMessage(''); }}>邮箱登录</button>
+        <button type="button" role="tab" aria-selected={authMode === 'sign_up'} class={authMode === 'sign_up' ? 'active' : ''} onClick={() => { setAuthMode('sign_up'); setMessage(''); }}>注册 QQ 邮箱</button>
+      </div>
+      <form class="auth-form" onSubmit={submitEmailAuth}>
+        <label>邮箱<input type="email" value={email} inputMode="email" autocomplete="email" placeholder="name@qq.com" onInput={(event) => setEmail((event.target as HTMLInputElement).value)} disabled={authSubmitting} required /></label>
+        <label>密码<input type="password" value={password} autocomplete={authMode === 'sign_up' ? 'new-password' : 'current-password'} placeholder="至少 8 位" minlength={8} onInput={(event) => setPassword((event.target as HTMLInputElement).value)} disabled={authSubmitting} required /></label>
+        <button type="submit" disabled={authSubmitting}>{authSubmitting ? '正在处理…' : authMode === 'sign_in' ? '登录并同步' : '创建账户'}</button>
+      </form>
+    </section>}
     {message && <p class="notice" role="status" aria-live="polite">{message}</p>}
-    {!internalBeta && showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
+    {showImport && <section class="migration" aria-label="旧试玩页数据"><div><strong>检测到旧试玩页数据</strong><span>可在后续登录时一次性导入你的账户。</span></div><button class="secondary" onClick={importLegacy}>准备导入</button></section>}
 
     <section class="decision-panel" aria-labelledby="today-title">
       <div class="decision-title"><div><h1 id="today-title">{snapshot ? `${snapshot.symbol} 研究结论` : '研究结论'}</h1>{verdict && <p>{verdict.headline}</p>}</div>{verdict && <span class={`decision-stance ${verdict.stance}`}>{verdict.stance}</span>}</div>

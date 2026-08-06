@@ -9,10 +9,7 @@ const config: CapacitorConfig = {
     cleartext: false,
     allowNavigation: [
       'stocks.cauai.fun',
-      '*.clerk.accounts.dev',
-      '*.clerk.com',
-      '*.convex.cloud',
-      '*.convex.site',
+      '*.supabase.co',
       '*.dodopayments.com',
     ],
   },

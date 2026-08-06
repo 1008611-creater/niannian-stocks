@@ -1,8 +1,8 @@
 # Android 发布
 
-当前 Capacitor 配置固定访问 `https://stocks.cauai.fun`，不会访问本机地址。`fun.cauai.niannianstocks` 是最终 Android 包名。当前发布版是 `1.1.0`，应用只允许正式股票站点、Clerk、Convex 与 Dodo 的必要导航域名。
+当前 Capacitor 配置固定访问 `https://stocks.cauai.fun`，不会访问本机地址。`fun.cauai.niannianstocks` 是最终 Android 包名。当前发布版是 `1.1.0`，应用只允许正式股票站点、Supabase Auth、Dodo 与 Firebase 的必要导航域名。
 
-登录和支付完成后统一使用 `fun.cauai.niannianstocks://auth/callback` 或 `fun.cauai.niannianstocks://payment/complete` 回到 APK；在 Clerk 与 Dodo 控制台中登记这两个精确回调地址。原生 `DeepLink` 插件只把回调类型通知给网页层，不记录授权码、支付参数或其他敏感内容。Android 已声明通知权限，Firebase 接入后仍必须在首次需要提醒时由用户主动授权。
+登录和支付完成后统一使用 `fun.cauai.niannianstocks://auth/callback` 或 `fun.cauai.niannianstocks://payment/complete` 回到 APK；在 Supabase 与 Dodo 控制台中登记这两个精确回调地址。原生 `DeepLink` 插件只把回调类型通知给网页层，不记录授权码、支付参数或其他敏感内容。Android 已声明通知权限，Firebase 接入后仍必须在首次需要提醒时由用户主动授权。
 
 开发验证：
 
@@ -14,7 +14,7 @@ npm run android:debug
 
 1. `stocks.cauai.fun` 已通过 Railway 与 Cloudflare 发布 HTTPS。
 2. Firebase Android 项目已登记相同包名，`google-services.json` 仅放在 `android/app/`，不提交仓库。
-3. Clerk、Dodo 和 Firebase 的允许域名及深链回跳已经在各自控制台配置。
+3. Supabase、Dodo 和 Firebase 的允许域名及深链回跳已经在各自控制台配置。
 4. 在仓库外生成发布签名密钥，并通过 Android `signingConfigs.release` 引用环境变量或安全路径。
 
 签名配置不会写入仓库。先在仓库外生成一次密钥，并在当前 PowerShell 会话中设置以下变量：

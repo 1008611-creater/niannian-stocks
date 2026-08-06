@@ -1,5 +1,5 @@
 -- 念念智股：仅供 Railway 服务端使用的用户数据模型。
--- 客户端不持有 service role 凭据；每一次读写均须由 Railway 验证 Clerk JWT 后按 user_id 约束。
+-- 客户端不持有 service role 凭据；每一次读写均须由 Railway 验证 Supabase Auth 访问令牌后按 user_id 约束。
 
 create extension if not exists pgcrypto;
 
@@ -164,7 +164,7 @@ create trigger niannian_entitlements_set_updated_at
   for each row execute function public.niannian_set_updated_at();
 
 -- 所有数据表均启用 RLS，且不创建匿名/浏览器直连策略。
--- 仅 Railway 的 service role 在验证 Clerk 身份、按 user_id 加条件后才能访问。
+-- 仅 Railway 的 service role 在验证 Supabase Auth 身份、按 user_id 加条件后才能访问。
 alter table public.niannian_portfolios enable row level security;
 alter table public.niannian_holdings enable row level security;
 alter table public.niannian_watchlist_items enable row level security;

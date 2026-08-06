@@ -4,6 +4,8 @@ import express from 'express';
 import helmet from 'helmet';
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getMessaging as getFirebaseMessaging } from 'firebase-admin/messaging';
 import { createMarketService, MarketError, normalizeSymbol } from './market.mjs';
 import { AuthError, createSupabaseAuthVerifier } from './auth.mjs';
 import { WorkspaceError, createWorkspaceStore } from './supabase.mjs';
@@ -20,6 +22,21 @@ const agentServiceUrls = [
   'https://tradingagents-production-f7f4.up.railway.app',
 ].filter((value, index, all) => Boolean(value) && all.indexOf(value) === index);
 const agentConfigured = Boolean(agentServiceUrls.length && process.env.NIANNIAN_AGENT_SERVICE_TOKEN);
+const firebaseCredentialsConfigured = Boolean(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY);
+let firebaseMessaging = null;
+if (process.env.FCM_ENABLED === 'true' && firebaseCredentialsConfigured) {
+  try {
+    const firebaseApp = getApps()[0] || initializeApp({ credential: cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    }) });
+    firebaseMessaging = getFirebaseMessaging(firebaseApp);
+  } catch (error) {
+    console.error('firebase-push-init-error', error?.message || 'unknown');
+  }
+}
+const pushConfigured = Boolean(firebaseMessaging);
 const redis = upstashConfigured ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN }) : null;
 const market = createMarketService({ redis, isProduction });
 const rateLimit = redis ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(30, '1 m'), prefix: 'stocks:ratelimit:market' }) : null;
@@ -52,6 +69,7 @@ app.get('/api/health', (_request, response) => response.json({
   auth: supabaseAuthConfigured ? 'configured' : 'not_configured',
   workspace: workspace.enabled ? 'configured' : 'not_configured',
   agent: agentConfigured ? 'configured' : 'not_configured',
+  push: pushConfigured ? 'configured' : 'not_configured',
   alerts: alertScanEnabled ? 'enabled' : 'not_configured',
   yahooFallback: false,
 }));
@@ -59,6 +77,7 @@ app.get('/api/auth/config', (_request, response) => response.json({
   configured: supabaseAuthConfigured,
   ...(supabaseAuthConfigured ? { url: supabaseAuthOrigin, anonKey: process.env.SUPABASE_ANON_KEY } : {}),
 }));
+app.get('/api/push/config', (_request, response) => response.json({ enabled: pushConfigured, platform: 'android' }));
 app.get('/api/market/research', async (request, response, next) => {
   try {
     const symbol = normalizeSymbol(request.query.symbol);
@@ -193,6 +212,21 @@ app.post('/api/account/alerts', async (request, response, next) => {
     response.status(201).json(await workspace.createAlertRule(userId, request.body));
   } catch (error) { next(error); }
 });
+app.post('/api/account/device-tokens', async (request, response, next) => {
+  try {
+    if (!pushConfigured) throw new WorkspaceError('push_not_configured', 503, '系统推送尚未完成 Firebase 配置。');
+    const { userId } = await verifySupabaseRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.status(201).json(await workspace.saveDeviceToken(userId, request.body));
+  } catch (error) { next(error); }
+});
+app.delete('/api/account/device-tokens', async (request, response, next) => {
+  try {
+    const { userId } = await verifySupabaseRequest(request);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(await workspace.removeDeviceToken(userId, request.body));
+  } catch (error) { next(error); }
+});
 app.delete('/api/account/alerts/:id', async (request, response, next) => {
   try {
     const { userId } = await verifySupabaseRequest(request);
@@ -208,6 +242,31 @@ app.post('/api/account/alerts/notifications/:id/read', async (request, response,
   } catch (error) { next(error); }
 });
 
+function alertPushBody(kind, value) {
+  if (kind === 'price_change') return `单日涨跌幅达到 ${Number(value) >= 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
+  if (kind === 'rsi_cross') return `RSI 当前为 ${Number(value).toFixed(1)}`;
+  return 'MA20 低于 MA50，请打开提醒中心查看研究快照。';
+}
+
+async function deliverAlertPush({ userId, symbol, kind, value, alertRuleId, periodKey }) {
+  if (!firebaseMessaging) return { attempted: 0, sent: 0 };
+  const tokens = await workspace.deviceTokensForUser(userId);
+  if (!tokens.length) return { attempted: 0, sent: 0 };
+  const result = await firebaseMessaging.sendEachForMulticast({
+    tokens,
+    notification: { title: `${symbol} 提醒`, body: alertPushBody(kind, value) },
+    data: { symbol, kind, alertRuleId, periodKey },
+  });
+  await Promise.all(result.responses.map((item, index) => {
+    const code = item.error?.code || '';
+    if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') {
+      return workspace.removeDeviceToken(userId, { token: tokens[index] }).catch(() => undefined);
+    }
+    return undefined;
+  }));
+  return { attempted: tokens.length, sent: result.successCount || 0 };
+}
+
 let alertScanRunning = false;
 async function runAlertScan() {
   if (!alertScanEnabled || alertScanRunning) return;
@@ -218,7 +277,7 @@ async function runAlertScan() {
       lockAcquired = Boolean(await redis.set(alertScanLockKey, `${process.pid}:${Date.now()}`, { nx: true, ex: 180 }));
       if (!lockAcquired) return;
     }
-    console.log('alert-scan', await workspace.scanAlertRules((symbol) => market.research(symbol)));
+    console.log('alert-scan', await workspace.scanAlertRules((symbol) => market.research(symbol), deliverAlertPush));
   }
   catch (error) { console.error('alert-scan-error', error?.message || 'unknown'); }
   finally {

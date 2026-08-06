@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { Capacitor } from '@capacitor/core';
+import { PushNotifications } from '@capacitor/push-notifications';
 import { ApiError, loadResearch } from './api';
 import { authHeader, loadSupabaseAuth } from './auth';
 import { EquityChart, PriceChart } from './chart';
@@ -9,6 +11,7 @@ const currency = new Intl.NumberFormat('en-US', { style: 'currency', currency: '
 const percentage = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'always', maximumFractionDigits: 2 });
 const defaultSnapshot = 'NVDA';
 const pendingAgentResearchStorageKey = 'niannian.pending-agent-research';
+const deviceTokenStorageKey = 'niannian-stocks-device-token-v1';
 const researchPrompts = [
   { label: '趋势与风险', question: '请解释当前趋势、关键风险与失效条件，并指出下一次日线应核查什么。' },
   { label: '回测复盘', question: '请比较研究策略与买入持有的表现，说明回撤和策略失效风险。' },
@@ -94,6 +97,9 @@ function getDeepLinkPlugin() {
   return (window as Window & { Capacitor?: { Plugins?: { DeepLink?: DeepLinkPlugin } } }).Capacitor?.Plugins?.DeepLink;
 }
 
+type PushPermissionState = 'unsupported' | 'checking' | 'prompt' | 'granted' | 'denied';
+type PushConfig = { enabled: boolean; platform: 'android' };
+
 type CloudWorkspace = {
   portfolios: { id: string; name: string; is_default: boolean }[];
   holdings: { id: string; portfolio_id: string; symbol: string; quantity: number; averageCost: number }[];
@@ -168,8 +174,11 @@ export default function App() {
   const [alertKind, setAlertKind] = useState<AlertKind>('price_change');
   const [alertThreshold, setAlertThreshold] = useState('5');
   const [alertsRefreshing, setAlertsRefreshing] = useState(false);
+  const [pushConfig, setPushConfig] = useState<PushConfig | null>(null);
+  const [pushPermission, setPushPermission] = useState<PushPermissionState>(Capacitor.isNativePlatform() ? 'checking' : 'unsupported');
   const requestRef = useRef<AbortController | null>(null);
   const importedAccountRef = useRef<string | null>(null);
+  const deviceTokenRef = useRef<string | null>(localStorage.getItem(deviceTokenStorageKey));
 
   const fetchSnapshot = (target: string, preserveSnapshot = false) => {
     requestRef.current?.abort();
@@ -205,6 +214,23 @@ export default function App() {
     window.addEventListener('online', markOnline);
     window.addEventListener('offline', markOffline);
     return () => { window.removeEventListener('online', markOnline); window.removeEventListener('offline', markOffline); };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    fetch('/api/push/config', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() as Promise<PushConfig> : { enabled: false, platform: 'android' as const }).then((config) => {
+      if (active) setPushConfig({ enabled: Boolean(config.enabled), platform: 'android' });
+    }).catch(() => { if (active) setPushConfig({ enabled: false, platform: 'android' }); });
+    return () => { active = false; };
+  }, []);
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) { setPushPermission('unsupported'); return; }
+    let active = true;
+    setPushPermission('checking');
+    PushNotifications.checkPermissions().then((status) => {
+      if (!active) return;
+      setPushPermission(status.receive === 'granted' ? 'granted' : status.receive === 'denied' ? 'denied' : 'prompt');
+    }).catch(() => { if (active) setPushPermission('unsupported'); });
+    return () => { active = false; };
   }, []);
 
   const activePortfolio = portfolios.find((item) => item.id === activePortfolioId) || portfolios[0] || localDefaultPortfolio;
@@ -292,6 +318,42 @@ export default function App() {
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => { active = false; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisibilityChange); };
   }, [accountUser, auth, accountState, accountRequest, applyWorkspace]);
+
+  useEffect(() => {
+    if (!accountUser || !auth || !pushConfig?.enabled || !Capacitor.isNativePlatform()) return;
+    let disposed = false;
+    const saveToken = async (token: string) => {
+      if (disposed || !token) return;
+      deviceTokenRef.current = token;
+      localStorage.setItem(deviceTokenStorageKey, token);
+      try {
+        const headers = new Headers(await authHeader(auth));
+        headers.set('content-type', 'application/json');
+        const response = await fetch('/api/account/device-tokens', { method: 'POST', headers, credentials: 'same-origin', body: JSON.stringify({ token, platform: 'android' }) });
+        if (!response.ok) throw accountError(response, await response.json().catch(() => ({})));
+      } catch (reason) {
+        if (!disposed) setMessage((reason as Error).message || '系统提醒设备登记失败，请稍后重试。');
+      }
+    };
+    let listeners: { remove: () => Promise<void> }[] = [];
+    Promise.all([
+      PushNotifications.addListener('registration', ({ value }) => void saveToken(value)),
+      PushNotifications.addListener('registrationError', (error) => { if (!disposed) setMessage(error.error || '系统提醒注册失败，请检查 Firebase 配置。'); }),
+      PushNotifications.addListener('pushNotificationReceived', (notification) => { if (!disposed) { setMessage(notification.title || '收到一条系统提醒。'); void refreshAlerts(false); } }),
+      PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+        if (disposed) return;
+        const nextSymbol = action.notification.data?.symbol;
+        if (typeof nextSymbol === 'string' && validSymbol(nextSymbol)) { setInput(nextSymbol); setSymbol(nextSymbol); }
+        void refreshAlerts(false);
+      }),
+    ]).then((next) => { listeners = next; }).catch(() => { if (!disposed) setMessage('系统提醒插件暂时不可用，请重新打开应用。'); });
+    return () => { disposed = true; listeners.forEach((listener) => void listener.remove()); };
+  }, [accountUser, auth, pushConfig?.enabled, refreshAlerts]);
+
+  useEffect(() => {
+    if (!accountUser || !auth || !pushConfig?.enabled || pushPermission !== 'granted' || !Capacitor.isNativePlatform()) return;
+    void PushNotifications.register().catch((reason) => setMessage((reason as Error).message || '系统提醒注册失败，请稍后重试。'));
+  }, [accountUser, auth, pushConfig?.enabled, pushPermission]);
 
   useEffect(() => {
     const plugin = getDeepLinkPlugin();
@@ -431,7 +493,31 @@ export default function App() {
     try { applyWorkspace(await accountRequest(`/api/account/alerts/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' })); }
     catch (reason) { setMessage((reason as Error).message); }
   }
-  async function signOut() { if (!auth) return; await auth.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setShowAuth(false); setAwaitingEmailCode(false); setVerificationCode(''); setMessage('已退出账户，本机草稿仍保留在此设备。'); }
+  async function enableSystemPush() {
+    if (!accountUser || !auth) { setMessage('请先登录后开启系统提醒。'); return; }
+    if (!Capacitor.isNativePlatform()) { setMessage('网页端使用站内提醒；系统推送请在 Android 应用中开启。'); return; }
+    if (!pushConfig?.enabled) { setMessage('系统推送尚未完成 Firebase 配置，当前可继续使用站内提醒。'); return; }
+    setPushPermission('checking');
+    try {
+      const status = await PushNotifications.requestPermissions();
+      if (status.receive !== 'granted') {
+        setPushPermission(status.receive === 'denied' ? 'denied' : 'prompt');
+        setMessage(status.receive === 'denied' ? '通知权限未开启，请到 Android 系统设置中允许念念智股发送通知。' : '通知权限尚未开启。');
+        return;
+      }
+      setPushPermission('granted');
+      setMessage('系统提醒已开启，设备令牌正在登记。');
+    } catch (reason) { setPushPermission('prompt'); setMessage((reason as Error).message || '系统提醒暂时无法开启，请稍后重试。'); }
+  }
+  async function signOut() {
+    if (!auth) return;
+    const token = deviceTokenRef.current;
+    if (token) {
+      try { const headers = new Headers(await authHeader(auth)); headers.set('content-type', 'application/json'); await fetch('/api/account/device-tokens', { method: 'DELETE', headers, credentials: 'same-origin', body: JSON.stringify({ token }) }); } catch { /* Signing out remains available if token cleanup is temporarily unavailable. */ }
+      deviceTokenRef.current = null; localStorage.removeItem(deviceTokenStorageKey);
+    }
+    await auth.signOut(); importedAccountRef.current = null; setAccountUser(null); setAccountState('signed_out'); setShowAuth(false); setAwaitingEmailCode(false); setVerificationCode(''); setMessage('已退出账户，本机草稿仍保留在此设备。');
+  }
   async function runAgentResearch(nextQuestion: string = agentQuestion) {
     if (!snapshot) return;
     setAgentLoading(true); setMessage('');
@@ -542,7 +628,7 @@ export default function App() {
           {snapshot?.events.length ? <ul class="event-list">{snapshot.events.map((event) => <li key={`${event.kind}-${event.date}-${event.title}`}><div><strong>{event.title}</strong><span>{event.detail}</span></div><time datetime={event.date}>{event.date} · {event.timing}</time></li>)}</ul> : <p class="muted">暂无可用事件</p>}
           <button type="button" class="secondary" onClick={() => { if (!accountUser) { setMessage('请先登录后设置提醒。'); return; } setShowAlertCenter((value) => !value); }}>{showAlertCenter ? '收起提醒中心' : '提醒设置'}</button>
           {accountUser && showAlertCenter && <div class="alert-center">
-            <div class="alert-toolbar"><strong>提醒中心</strong><button type="button" class="quiet" onClick={() => void refreshAlerts(true)} disabled={alertsRefreshing}>{alertsRefreshing ? '同步中…' : '刷新提醒'}</button></div>
+          <div class="alert-toolbar"><strong>提醒中心</strong><div class="alert-toolbar-actions">{pushConfig?.enabled && Capacitor.isNativePlatform() ? <button type="button" class="secondary" onClick={() => void enableSystemPush()} disabled={pushPermission === 'checking' || pushPermission === 'granted'}>{pushPermission === 'granted' ? '系统提醒已开启' : pushPermission === 'denied' ? '重新开启系统提醒' : '开启系统提醒'}</button> : <span class="push-status">{Capacitor.isNativePlatform() ? '系统推送待配置' : '网页使用站内提醒'}</span>}<button type="button" class="quiet" onClick={() => void refreshAlerts(true)} disabled={alertsRefreshing}>{alertsRefreshing ? '同步中…' : '刷新提醒'}</button></div></div>
             <form class="alert-form" onSubmit={(event) => { event.preventDefault(); void createAlert(); }}>
               <label>提醒规则<select aria-label="提醒规则" value={alertKind} onChange={(event) => setAlertKind((event.target as HTMLSelectElement).value as AlertKind)}><option value="price_change">单日涨跌幅</option><option value="rsi_cross">RSI 极端</option><option value="trend_shift">趋势偏弱</option></select></label>
               {alertKind !== 'trend_shift' && <label>阈值<input aria-label="提醒阈值" type="number" value={alertThreshold} min={alertKind === 'rsi_cross' ? 50 : 0.1} max={alertKind === 'rsi_cross' ? 90 : 100} step={alertKind === 'rsi_cross' ? 1 : 0.1} onInput={(event) => setAlertThreshold((event.target as HTMLInputElement).value)} /></label>}

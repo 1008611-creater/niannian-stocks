@@ -13,6 +13,8 @@
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `FCM_ENABLED=true` only after both the Android Firebase app and server-side Firebase Admin credentials are configured.
+- `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` (server-only; never put these in the APK or Git)
 
 账号与云同步使用 Supabase Auth。匿名公钥只会由 `/api/auth/config` 提供给网页；`SUPABASE_SERVICE_ROLE_KEY` 只能保留在 Railway，绝不能写入网页、APK、Git 或日志。
 
@@ -33,6 +35,12 @@
 ## Cloudflare
 
 在 `cauai.fun` 的 DNS 中为 `stocks` 添加 CNAME，目标使用 Railway 给出的服务域名；等待 Railway 的自定义域名页面确认 HTTPS 已签发后，再把 `https://stocks.cauai.fun` 作为正式入口。
+
+## Firebase / Android system reminders
+
+The Android project already includes `@capacitor/push-notifications`, requests notification permission only after the user taps the system-reminder action, and stores the resulting device token through the authenticated Railway API. Until Firebase is configured, `/api/push/config` returns `enabled:false` and the UI keeps showing the in-app reminder center only.
+
+To enable actual system delivery, create an Android Firebase app with package name `fun.cauai.niannianstocks`, place its `google-services.json` at `android/app/google-services.json` without committing it, and configure Firebase Admin credentials in Railway. Only then set `FCM_ENABLED=true`. The backend will send each newly deduplicated alert to enabled Android tokens, mark the record `sent` or `failed`, and remove tokens Firebase reports as invalid. The remaining work is external configuration and real-device receive verification.
 
 ## Android
 

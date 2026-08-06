@@ -12,7 +12,9 @@ function validSymbol(value) { return typeof value === 'string' && symbolPattern.
 function numberOrNull(value) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : null; }
 function nonEmptyName(value) { return typeof value === 'string' ? value.trim().slice(0, 40) : ''; }
 function isUuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
+function validDeviceToken(value) { return typeof value === 'string' && value.trim().length >= 20 && value.trim().length <= 4096; }
 const alertKinds = new Set(['price_change', 'rsi_cross', 'trend_shift']);
+const devicePlatforms = new Set(['android', 'web']);
 
 export function createWorkspaceStore({ url, serviceRoleKey }) {
   const origin = String(url || '').replace(/\/$/, '');
@@ -86,6 +88,36 @@ export function createWorkspaceStore({ url, serviceRoleKey }) {
     return workspaceFor(userId);
   }
 
+  async function saveDeviceToken(userId, payload) {
+    const token = typeof payload?.token === 'string' ? payload.token.trim() : '';
+    const platform = typeof payload?.platform === 'string' ? payload.platform.trim().toLowerCase() : '';
+    if (!validDeviceToken(token) || !devicePlatforms.has(platform)) throw new WorkspaceError('invalid_device_token', 400, '设备令牌格式不正确。');
+    await request('niannian_device_tokens', {
+      method: 'POST',
+      query: { on_conflict: 'token' },
+      body: { user_id: userId, token, platform, enabled: true, last_seen_at: new Date().toISOString() },
+      prefer: 'resolution=merge-duplicates,return=minimal',
+    });
+    return { registered: true };
+  }
+
+  async function removeDeviceToken(userId, payload) {
+    const token = typeof payload?.token === 'string' ? payload.token.trim() : '';
+    if (!validDeviceToken(token)) throw new WorkspaceError('invalid_device_token', 400, '设备令牌格式不正确。');
+    await request('niannian_device_tokens', { method: 'DELETE', query: { user_id: `eq.${userId}`, token: `eq.${token}` }, prefer: 'return=minimal' });
+    return { removed: true };
+  }
+
+  async function deviceTokensForUser(userId) {
+    const rows = await request('niannian_device_tokens', { query: { select: 'token', user_id: `eq.${userId}`, platform: 'eq.android', enabled: 'eq.true', order: 'last_seen_at.desc', limit: 50 } });
+    return (rows || []).map((item) => item.token).filter(validDeviceToken);
+  }
+
+  async function markAlertDelivery(userId, alertRuleId, periodKey, status) {
+    const body = { status, ...(status === 'sent' ? { delivered_at: new Date().toISOString() } : {}) };
+    await request('niannian_alert_deliveries', { method: 'PATCH', query: { user_id: `eq.${userId}`, alert_rule_id: `eq.${alertRuleId}`, period_key: `eq.${periodKey}` }, body, prefer: 'return=minimal' });
+  }
+
   function alertMatch(rule, snapshot) {
     if (rule.kind === 'price_change') return Math.abs(Number(snapshot?.summary?.changePct)) >= Number(rule.threshold);
     if (rule.kind === 'rsi_cross') {
@@ -101,9 +133,9 @@ export function createWorkspaceStore({ url, serviceRoleKey }) {
     return snapshot.summary.trend === 'bullish' ? 1 : -1;
   }
 
-  async function scanAlertRules(research) {
+  async function scanAlertRules(research, deliver) {
     const rules = await request('niannian_alert_rules', { query: { select: 'id,user_id,symbol,kind,threshold', enabled: 'eq.true', order: 'updated_at.desc', limit: 100 } });
-    const snapshots = new Map(); const result = { rules: rules?.length || 0, triggered: 0, skipped: 0, failed: 0 };
+    const snapshots = new Map(); const result = { rules: rules?.length || 0, triggered: 0, sent: 0, skipped: 0, failed: 0 };
     for (const rule of rules || []) {
       try {
         if (!snapshots.has(rule.symbol)) snapshots.set(rule.symbol, await research(rule.symbol));
@@ -114,6 +146,20 @@ export function createWorkspaceStore({ url, serviceRoleKey }) {
         if (existing?.length) { result.skipped += 1; continue; }
         await request('niannian_alert_deliveries', { method: 'POST', query: { on_conflict: 'alert_rule_id,period_key' }, body: { user_id: rule.user_id, alert_rule_id: rule.id, symbol: rule.symbol, period_key: periodKey, status: 'triggered', value: alertValue(rule, snapshot) }, prefer: 'resolution=ignore-duplicates,return=minimal' });
         result.triggered += 1;
+        if (typeof deliver === 'function') {
+          try {
+            const delivery = await deliver({ userId: rule.user_id, symbol: rule.symbol, kind: rule.kind, value: alertValue(rule, snapshot), alertRuleId: rule.id, periodKey });
+            if (delivery?.attempted > 0) {
+              const status = delivery.sent > 0 ? 'sent' : 'failed';
+              await markAlertDelivery(rule.user_id, rule.id, periodKey, status);
+              if (status === 'sent') result.sent += 1;
+              else result.failed += 1;
+            }
+          } catch (error) {
+            await markAlertDelivery(rule.user_id, rule.id, periodKey, 'failed').catch(() => undefined);
+            throw error;
+          }
+        }
       } catch (error) {
         result.failed += 1;
         console.error('alert-scan-rule-error', rule.symbol, rule.kind, error?.message || 'unknown');
@@ -224,5 +270,5 @@ export function createWorkspaceStore({ url, serviceRoleKey }) {
     return workspaceFor(userId);
   }
 
-  return { enabled, workspaceFor, importFirstWorkspace, addWatchlistItem, removeWatchlistItem, createPortfolio, saveHolding, removeHolding, createAlertRule, removeAlertRule, markAlertRead, scanAlertRules };
+  return { enabled, workspaceFor, importFirstWorkspace, addWatchlistItem, removeWatchlistItem, createPortfolio, saveHolding, removeHolding, createAlertRule, removeAlertRule, markAlertRead, saveDeviceToken, removeDeviceToken, deviceTokensForUser, scanAlertRules };
 }

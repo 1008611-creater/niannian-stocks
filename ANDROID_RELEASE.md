@@ -4,6 +4,8 @@
 
 登录和支付完成后统一使用 `fun.cauai.niannianstocks://auth/callback` 或 `fun.cauai.niannianstocks://payment/complete` 回到 APK；在 Supabase 与 Dodo 控制台中登记这两个精确回调地址。原生 `DeepLink` 插件只把回调类型通知给网页层，不记录授权码、支付参数或其他敏感内容。Android 已声明通知权限，Firebase 接入后仍必须在首次需要提醒时由用户主动授权。
 
+当前状态：`@capacitor/push-notifications` 已接入并可编译，设备令牌接口和 Firebase Admin 发送逻辑已接入 Railway/Supabase；由于尚未放入 `google-services.json`，且 Railway 尚未配置 Firebase Admin 凭据，应用会显示“系统推送待配置”，不会申请通知权限。真正的系统推送还需要 Firebase 客户端配置和真机接收验收。
+
 开发验证：
 
 ```powershell
